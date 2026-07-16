@@ -1,0 +1,23 @@
+*.pyc
+__pycache__/
+.env
+.venv/
+.pytest_cache/
+.tox/
+.cache/
+.DS_Store
+# Exclude potential artifact paths, though Artifacts should be outside repo
+artifact_data/
+**/artifact_data/
+
+# Local secrets and authentication state
+.env.*
+!.env.example
+*.storage-state.json
+*.storage_state.json
+storage_state/
+browser_state/
+
+# Runtime artifacts
+artifacts/
+runtime_artifacts/
