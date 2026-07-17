@@ -21,3 +21,4 @@ browser_state/
 # Runtime artifacts
 artifacts/
 runtime_artifacts/
+*.log
