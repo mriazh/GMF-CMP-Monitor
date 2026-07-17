@@ -97,6 +97,57 @@ def classify_state(page: object) -> DashboardState:
     return DashboardState.UNKNOWN
 
 
+def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> bool:
+    """Click the Dashboard item in the SPA menu and wait for the dashboard state.
+
+    Returns True if the menu click led to the dashboard state. Falls back to the
+    text locator if the main-menu-item-caption locator is not visible/present.
+    """
+    try:
+        menu = page.locator("span.main-menu-item-caption", has_text="Dashboard").first
+        if not hasattr(menu, "is_visible") or not menu.is_visible():
+            menu = page.get_by_text("Dashboard", exact=True)
+        menu.click()
+    except Exception:
+        log.info("SPA Dashboard menu click failed; falling back to direct navigation")
+        return False
+
+    deadline = clock.now() + (settings.navigation_timeout_ms / 1000.0)
+    while clock.now() < deadline:
+        if classify_state(page) == DashboardState.DASHBOARD:
+            return True
+        clock.sleep(0.1)
+    return False
+
+
+def navigate_to_dashboard(
+    page: object, settings: Settings, clock: Clock | None = None
+) -> bool:
+    """Navigate to the dashboard via the SPA menu, falling back to a direct goto.
+
+    Returns True on success. Raises RecoveryError if the dashboard cannot be
+    reached through either the menu click or a direct navigation.
+    """
+    if clock is None:
+        clock = SystemClock()
+
+    if _click_dashboard_menu(page, settings, clock):
+        return True
+
+    try:
+        page.goto(
+            settings.cmp_dashboard_url,
+            timeout=settings.navigation_timeout_ms,
+            wait_until="domcontentloaded",
+        )
+    except Exception as nav_exc:
+        raise RecoveryError("Dashboard navigation failed") from nav_exc
+
+    if classify_state(page) != DashboardState.DASHBOARD:
+        raise RecoveryError("Dashboard recovery failed: unexpected state")
+    return True
+
+
 class ContinuousMonitor:
     """Dashboard monitor that periodically refreshes and handles session expiry."""
 
@@ -129,24 +180,15 @@ class ContinuousMonitor:
                  backoff, self._consecutive_recoveries, self._settings.recovery_retry_limit)
         self._clock.sleep(backoff)
 
-        # Try to navigate back to dashboard
+        # Try to navigate back to dashboard (SPA menu click, then direct goto)
         try:
-            self._page.goto(
-                self._settings.cmp_dashboard_url,
-                timeout=self._settings.navigation_timeout_ms,
-                wait_until="domcontentloaded",
-            )
+            navigate_to_dashboard(self._page, self._settings, self._clock)
+        except RecoveryError:
+            # Navigation failed, counter retained, will be checked on next cycle
+            raise
         except Exception as nav_exc:
             log.error("Navigation to dashboard failed during recovery: %s", type(nav_exc).__name__)
-            # Navigation failed, counter retained, will be checked on next cycle
             raise RecoveryError("Dashboard recovery failed") from nav_exc
-
-        # Verify we're back at dashboard
-        recovery_state = classify_state(self._page)
-        if recovery_state != DashboardState.DASHBOARD:
-            log.error("Recovery navigation did not reach dashboard, state: %s", recovery_state)
-            # Not at dashboard, counter retained
-            raise RecoveryError("Dashboard recovery failed: unexpected state")
 
         # Successfully recovered to dashboard
         self._consecutive_recoveries = 0
@@ -174,12 +216,9 @@ class ContinuousMonitor:
 
                 if new_state == DashboardState.PRODUCTS:
                     log.info("Navigating back to dashboard")
-                    self._page.goto(
-                        self._settings.cmp_dashboard_url,
-                        timeout=self._settings.navigation_timeout_ms,
-                        wait_until="domcontentloaded",
-                    )
-                    if classify_state(self._page) != DashboardState.DASHBOARD:
+                    try:
+                        navigate_to_dashboard(self._page, self._settings, self._clock)
+                    except RecoveryError:
                         self._recover_to_dashboard()
                     else:
                         self._consecutive_recoveries = 0
@@ -204,17 +243,10 @@ class ContinuousMonitor:
             elif current_state == DashboardState.PRODUCTS:
                 log.info("Redirected to products, navigating to dashboard")
                 try:
-                    self._page.goto(
-                        self._settings.cmp_dashboard_url,
-                        timeout=self._settings.navigation_timeout_ms,
-                        wait_until="domcontentloaded",
-                    )
-                except Exception:
-                    log.error("Navigation to dashboard failed: %s", type(Exception).__name__)
+                    navigate_to_dashboard(self._page, self._settings, self._clock)
+                except RecoveryError:
                     log.error("Navigation to dashboard failed; starting bounded recovery")
                     return self._recover_to_dashboard()
-                if classify_state(self._page) != DashboardState.DASHBOARD:
-                    self._recover_to_dashboard()
                 else:
                     self._consecutive_recoveries = 0
                 return False

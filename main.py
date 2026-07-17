@@ -16,7 +16,7 @@ from playwright.sync_api import sync_playwright
 from config import load_settings, ConfigError
 from imap_client import ImapClient, SystemClock
 from cmp_auth import authenticate_cmp, AuthenticationError
-from dashboard_monitor import ContinuousMonitor, DashboardState, RecoveryError, RecoveryExhaustedError
+from dashboard_monitor import ContinuousMonitor, DashboardState, RecoveryError, RecoveryExhaustedError, navigate_to_dashboard
 
 log = logging.getLogger(__name__)
 
@@ -71,12 +71,8 @@ def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = Non
         authenticate_cmp(settings=settings, otp_provider=imap_client, page=page, clock=clock)
         log.info("Authentication successful")
 
-        # 6. Navigate to dashboard
-        page.goto(
-            settings.cmp_dashboard_url,
-            timeout=settings.navigation_timeout_ms,
-            wait_until="domcontentloaded",
-        )
+        # 6. Navigate to dashboard via SPA menu (fallback: direct goto)
+        navigate_to_dashboard(page, settings)
         log.info("Navigated to dashboard")
 
         # 6. Monitor

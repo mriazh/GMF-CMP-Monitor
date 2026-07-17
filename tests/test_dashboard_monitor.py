@@ -56,6 +56,8 @@ class FakePage:
         self.default_timeout = 30000
         self._state = "initial"
         self._products_url = "https://ep.iotcc.telkomsel.com/#!products"
+        self._menu_visible = False
+        self._dashboard_url = "https://ep.iotcc.telkomsel.com/#!dashboard"
         if "cas/login" in self._url:
             self._state = "cas"
             self._locator_visible["#username"] = True
@@ -98,7 +100,11 @@ class FakePage:
     def input_value(self, selector):
         return self.inputs.get(selector, "")
 
-    def wait_for_selector(self, selector, timeout=None):
+    def wait_for_selector(self, selector, timeout=None, state=None):
+        if selector == "#username" and self._state == "cas":
+            return True
+        if selector == "#fm1 input[name='submit']" and self._state == "cas":
+            return True
         if selector == "#token" and self._state == "otp_form":
             return True
         return None
@@ -106,8 +112,16 @@ class FakePage:
     def reload(self):
         self._navigations.append(self._url)
 
-    def locator(self, selector):
+    def locator(self, selector, has_text=None):
+        if selector == "span.main-menu-item-caption":
+            return FakeMenuLocator(self, has_text=has_text, visible=self._menu_visible)
         return FakeLocator(self._locator_visible.get(selector, False))
+
+    def get_by_text(self, text, exact=False):
+        return FakeMenuLocator(self, has_text=text, visible=self._menu_visible)
+
+    def set_menu_visible(self, visible=True):
+        self._menu_visible = visible
 
     def set_products_url(self, url):
         self._products_url = url
@@ -120,6 +134,29 @@ class FakePage:
         self._locator_visible["#password"] = True
         self._locator_visible["#token"] = False
         self._navigations.append(self._url)
+
+
+class FakeMenuLocator:
+    """Fake Playwright Locator for the SPA Dashboard menu item."""
+
+    def __init__(self, page, has_text=None, visible=False):
+        self._page = page
+        self._has_text = has_text
+        self._visible = visible
+
+    @property
+    def first(self):
+        return self
+
+    def is_visible(self):
+        return self._visible
+
+    def click(self):
+        if not self._visible:
+            raise RuntimeError("Dashboard menu not visible")
+        self._page._url = self._page._dashboard_url
+        self._page._state = "dashboard"
+        self._page._navigations.append(self._page._dashboard_url)
 
 
 class FakeLocator:
@@ -705,7 +742,6 @@ class TestNavigationFailureRecovery:
         clock = FakeClock()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=clock)
 
-        # Reload failure is recovered by navigating back to the dashboard.
         assert monitor.monitor_once() is True
         assert monitor._consecutive_recoveries == 0
         assert settings.recovery_backoff_seconds in clock.sleep_calls
@@ -714,3 +750,82 @@ class TestNavigationFailureRecovery:
             settings.navigation_timeout_ms,
             "domcontentloaded",
         )
+
+
+class TestDashboardMenuNavigation:
+    """SPA menu-click navigation from products/dashboard to the dashboard state."""
+
+    def test_navigate_to_dashboard_uses_menu_click(self):
+        """When the SPA menu is visible, navigate_to_dashboard clicks it and does not goto."""
+        from dashboard_monitor import navigate_to_dashboard
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+
+        result = navigate_to_dashboard(page, settings, FakeClock())
+        assert result is True
+        assert page.url == settings.cmp_dashboard_url
+        assert page.goto_calls == []
+
+    def test_navigate_to_dashboard_fallback_goto(self):
+        """When the SPA menu is not visible, fall back to a direct navigation."""
+        from dashboard_monitor import navigate_to_dashboard
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        # Menu not visible (default) so it falls back to goto.
+
+        result = navigate_to_dashboard(page, settings, FakeClock())
+        assert result is True
+        assert page.goto_calls[-1] == (
+            settings.cmp_dashboard_url,
+            settings.navigation_timeout_ms,
+            "domcontentloaded",
+        )
+
+    def test_monitor_once_products_menu_click_no_new_otp(self):
+        """Products redirect uses the menu click to return to dashboard without a new OTP."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(
+            settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock()
+        )
+
+        result = monitor.monitor_once()
+        assert result is False
+        assert page.url == settings.cmp_dashboard_url
+        assert len(otp_provider.poll_calls) == 0
+        assert page.goto_calls == []
+
+    def test_recovery_uses_menu_click_when_visible(self):
+        """Unknown-state recovery uses the menu click when the menu is visible."""
+        settings = make_test_settings()
+        page = FakePage("https://unknown.com")
+        page.set_menu_visible(True)
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(
+            settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock()
+        )
+
+        assert monitor.monitor_once() is True
+        assert page.url == settings.cmp_dashboard_url
+        assert page.goto_calls == []
+        assert len(otp_provider.poll_calls) == 0
+
+    def test_menu_click_failure_falls_back_to_goto(self):
+        """If the menu is not visible, navigation falls back to a direct goto."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        # Menu not visible -> the menu branch returns False and goto is used.
+
+        from dashboard_monitor import navigate_to_dashboard
+        assert navigate_to_dashboard(page, settings, FakeClock()) is True
+        assert page.goto_calls != []
+        assert page.url == settings.cmp_dashboard_url

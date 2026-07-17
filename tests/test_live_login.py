@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 from config import load_settings, PROJECT_ROOT
 from imap_client import ImapClient, SystemClock
 from cmp_auth import authenticate_cmp
-from dashboard_monitor import classify_state, DashboardState
+from dashboard_monitor import classify_state, DashboardState, navigate_to_dashboard
 
 @pytest.mark.live
 def test_live_login_to_dashboard():
@@ -31,8 +31,8 @@ def test_live_login_to_dashboard():
             authenticated = authenticate_cmp(settings=settings, otp_provider=imap_client, page=page, clock=clock)
             assert authenticated is True
 
-            # Navigate to dashboard
-            page.goto(settings.cmp_dashboard_url, timeout=settings.navigation_timeout_ms, wait_until="commit")
+            # Navigate to dashboard via SPA menu click (fallback: direct goto)
+            assert navigate_to_dashboard(page, settings, clock) is True
             assert classify_state(page) == DashboardState.DASHBOARD
     finally:
         imap_client.disconnect()

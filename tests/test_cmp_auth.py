@@ -93,8 +93,10 @@ class FakePage:
     def input_value(self, selector: str) -> str:
         return self.inputs.get(selector, "")
 
-    def wait_for_selector(self, selector: str, timeout: int = None):
+    def wait_for_selector(self, selector: str, timeout: int = None, state: str = None):
         if selector == "#username" and self._state == "cas":
+            return True
+        if selector == "#fm1 input[name='submit']" and self._state == "cas":
             return True
         if selector == "#token" and self._state == "otp_form":
             self._otp_form_visible = True

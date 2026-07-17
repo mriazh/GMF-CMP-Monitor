@@ -78,7 +78,7 @@ def _do_authenticate(
         # Navigate to CAS URL - log safe label only
         current_step = "navigating to CAS login page"
         log.info("Navigating to CAS login page")
-        page.goto(settings.cas_url, timeout=settings.navigation_timeout_ms, wait_until="commit")
+        page.goto(settings.cas_url, timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
         page.wait_for_selector("#username", timeout=settings.navigation_timeout_ms)
 
         # Set default timeout for page operations
@@ -107,6 +107,7 @@ def _do_authenticate(
 
         # Submit username/password form
         current_step = "submitting initial credentials form"
+        page.wait_for_selector("#fm1 input[name='submit']", state="visible", timeout=settings.navigation_timeout_ms)
         page.click("#fm1 input[name='submit'][type='submit']")
         log.info("Initial form submitted")
 

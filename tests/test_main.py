@@ -88,7 +88,8 @@ class TestConfigurationLoading:
 
 
 class TestFirefoxOnly:
-    def test_firefox_requested(self):
+    @patch("main.navigate_to_dashboard")
+    def test_firefox_requested(self, mock_navigate):
         """Verify Firefox is requested via playwright.firefox.launch."""
         with patch("main.sync_playwright") as mock_sync:
             mock_playwright = MagicMock()
@@ -123,7 +124,8 @@ class TestFirefoxOnly:
 
 
 class TestPlaywrightStopInvoked:
-    def test_playwright_stop_on_exit(self):
+    @patch("main.navigate_to_dashboard")
+    def test_playwright_stop_on_exit(self, mock_navigate):
         """Verify playwright.stop() is called on exit."""
         with patch("main.sync_playwright") as mock_sync:
             mock_playwright = MagicMock()
@@ -154,7 +156,8 @@ class TestPlaywrightStopInvoked:
 
 
 class TestCleanupOrder:
-    def test_cleanup_order_page_context_browser_playwright_imap(self):
+    @patch("main.navigate_to_dashboard")
+    def test_cleanup_order_page_context_browser_playwright_imap(self, mock_navigate):
         """Verify resources are cleaned up in correct order."""
         cleanup_order = []
 
@@ -243,7 +246,8 @@ class TestCleanupAfterPartialInitialization:
 
 
 class TestGracefulShutdown:
-    def test_keyboard_interrupt_returns_zero(self):
+    @patch("main.navigate_to_dashboard")
+    def test_keyboard_interrupt_returns_zero(self, mock_navigate):
         """Test that KeyboardInterrupt returns 0."""
         with patch("main.sync_playwright") as mock_sync:
             mock_playwright = MagicMock()
@@ -273,7 +277,8 @@ class TestGracefulShutdown:
 
 
 class TestRecoveryExhaustedReturnsError:
-    def test_recovery_exhausted_returns_one(self):
+    @patch("main.navigate_to_dashboard")
+    def test_recovery_exhausted_returns_one(self, mock_navigate):
         """Test that RecoveryExhaustedError returns 1."""
         from dashboard_monitor import RecoveryExhaustedError
 
