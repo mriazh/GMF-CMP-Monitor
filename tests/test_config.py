@@ -12,6 +12,7 @@ from config import (
     APPROVED_CMP_HOST,
     DEFAULT_RUN_START_TIMEZONE,
     load_settings,
+    PROJECT_ROOT,
     SecretValue,
     Settings,
 )
@@ -141,6 +142,45 @@ class TestCasUrlValidation:
         }
         settings = load_settings(env=env)
         assert settings.cas_url == env["CMP_CAS_URL"]
+
+
+class TestEnvFileLoading:
+    def test_automatic_env_loading(self, tmp_path):
+        # Create a temp .env file
+        env_content = (
+            "CMP_CAS_URL=https://ep.iotcc.telkomsel.com/cas/login\n"
+            "CMP_PRODUCTS_URL=https://ep.iotcc.telkomsel.com/#!products\n"
+            "CMP_DASHBOARD_URL=https://ep.iotcc.telkomsel.com/#!dashboard\n"
+            "CMP_USERNAME=testuser\n"
+            "CMP_PASSWORD=testpass\n"
+            "IMAP_USERNAME=imapuser\n"
+            "IMAP_PASSWORD=imappass\n"
+        )
+        dot_env = tmp_path / ".env"
+        dot_env.write_text(env_content)
+
+        # Change CWD and load settings automatically
+        original_cwd = Path.cwd()
+        os.chdir(tmp_path)
+        try:
+            settings = load_settings()
+            assert settings.cmp_username.get_secret_value() == "testuser"
+        finally:
+            os.chdir(original_cwd)
+
+    def test_root_dotenv_validation(self):
+        """Validate the root .env file if present in the repository."""
+        env_path = PROJECT_ROOT / ".env"
+        if not env_path.exists():
+            pytest.skip(".env file not present in project root")
+
+        settings = load_settings(env_file=env_path)
+
+        assert settings.cas_url.startswith("https://")
+        assert len(settings.cmp_username.get_secret_value()) > 0
+        assert len(settings.cmp_password.get_secret_value()) > 0
+        assert len(settings.imap_username.get_secret_value()) > 0
+        assert len(settings.imap_password.get_secret_value()) > 0
 
 
 class TestTimezoneValidation:

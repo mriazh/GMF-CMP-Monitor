@@ -134,9 +134,10 @@ class ContinuousMonitor:
             self._page.goto(
                 self._settings.cmp_dashboard_url,
                 timeout=self._settings.navigation_timeout_ms,
+                wait_until="domcontentloaded",
             )
         except Exception as nav_exc:
-            log.error("Navigation to dashboard failed during recovery")
+            log.error("Navigation to dashboard failed during recovery: %s", type(nav_exc).__name__)
             # Navigation failed, counter retained, will be checked on next cycle
             raise RecoveryError("Dashboard recovery failed") from nav_exc
 
@@ -176,6 +177,7 @@ class ContinuousMonitor:
                     self._page.goto(
                         self._settings.cmp_dashboard_url,
                         timeout=self._settings.navigation_timeout_ms,
+                        wait_until="domcontentloaded",
                     )
                     if classify_state(self._page) != DashboardState.DASHBOARD:
                         self._recover_to_dashboard()
@@ -205,8 +207,10 @@ class ContinuousMonitor:
                     self._page.goto(
                         self._settings.cmp_dashboard_url,
                         timeout=self._settings.navigation_timeout_ms,
+                        wait_until="domcontentloaded",
                     )
                 except Exception:
+                    log.error("Navigation to dashboard failed: %s", type(Exception).__name__)
                     log.error("Navigation to dashboard failed; starting bounded recovery")
                     return self._recover_to_dashboard()
                 if classify_state(self._page) != DashboardState.DASHBOARD:
@@ -238,7 +242,7 @@ class ContinuousMonitor:
             raise
         except Exception as exc:
             # Do not log raw exception (may contain sensitive data)
-            log.error("Monitoring error occurred")
+            log.error("Monitoring error occurred: %s", type(exc).__name__)
             self._consecutive_recoveries += 1
             self._check_recovery_limit()
             # Re-raise to avoid silently masking errors
@@ -264,6 +268,7 @@ class ContinuousMonitor:
         self._page.goto(
             self._settings.cmp_dashboard_url,
             timeout=self._settings.navigation_timeout_ms,
+            wait_until="domcontentloaded",
         )
         # Verify we're at dashboard
         if classify_state(self._page) != DashboardState.DASHBOARD:

@@ -28,7 +28,8 @@ def make_test_settings(**overrides) -> Settings:
         "run_start_timezone": "Asia/Jakarta",
         "browser_timeout_ms": 30000,
         "navigation_timeout_ms": 30000,
-        "otp_form_timeout_ms": 5000,
+        "otp_form_timeout_ms": 30000,
+        "otp_clock_skew_tolerance_seconds": 120,
         "refresh_interval_seconds": 60,
         "recovery_retry_limit": 3,
         "recovery_backoff_seconds": 5,
@@ -51,14 +52,19 @@ class FakePage:
         self.inputs = {}
         self._otp_form_visible = False
         self.default_timeout = 30000
-        self._state = "initial"  # initial -> cas -> otp_form -> products
+        self._state = "initial"  # initial -> cas -> otp_form -> root_portal -> products
         self._products_url = "https://ep.iotcc.telkomsel.com/#!products"  # Default products URL
+        self._root_portal_url = "https://ep.iotcc.telkomsel.com/"  # Root portal URL
 
-    def goto(self, url: str, timeout: int = None):
+    def goto(self, url: str, timeout: int = None, wait_until: str = None):
         self.urls.append((url, timeout))
         self.current_url = url
         if "cas/login" in url:
             self._state = "cas"
+        elif url == self._products_url:
+            self._state = "products"
+        elif url == self._root_portal_url:
+            self._state = "root_portal"
 
     def fill(self, selector: str, value: str):
         self.fills[selector] = value
@@ -73,9 +79,9 @@ class FakePage:
         # OTP form submit: #login input[name='_eventId_submit'][type='submit']
         elif selector == "#login input[name='_eventId_submit'][type='submit']":
             if self._state == "otp_form" and self.fills.get("#token"):
-                # Second submit: OTP -> products page
-                self._state = "products"
-                self.current_url = self._products_url
+                # Second submit: OTP -> root portal (not directly products)
+                self._state = "root_portal"
+                self.current_url = self._root_portal_url
 
     def set_default_timeout(self, timeout: int):
         self.default_timeout = timeout
@@ -88,15 +94,33 @@ class FakePage:
         return self.inputs.get(selector, "")
 
     def wait_for_selector(self, selector: str, timeout: int = None):
+        if selector == "#username" and self._state == "cas":
+            return True
         if selector == "#token" and self._state == "otp_form":
             self._otp_form_visible = True
+            return True
+        return None
 
     def wait_for_url(self, pattern: str, timeout: int = None):
         # Old implementation - should not be called in new code
         pass
 
+    def evaluate(self, script: str):
+        """Simulate page.evaluate for fragment checking."""
+        if "window.location.hash" in script:
+            if self._state == "products":
+                return "#!products"
+            elif self._state == "root_portal":
+                return ""  # No fragment on root portal
+        if "window.location.href" in script:
+            return self.current_url
+        return None
+
     def set_products_url(self, url: str):
         self._products_url = url
+
+    def set_root_portal_url(self, url: str):
+        self._root_portal_url = url
 
 
 class FakeOtpProvider:
@@ -324,12 +348,12 @@ class TestFragmentBasedSuccessDetection:
         assert page.current_url == "https://ep.iotcc.telkomsel.com/#!products"
 
     def test_rejects_http_products_url(self):
-        settings = make_test_settings(navigation_timeout_ms=100)
+        settings = make_test_settings(
+            navigation_timeout_ms=100,
+            cmp_products_url="http://ep.iotcc.telkomsel.com/#!products"
+        )
         page = FakePage()
         otp = FakeOtpProvider()
-
-        # Set products URL to HTTP (should be rejected)
-        page.set_products_url("http://ep.iotcc.telkomsel.com/#!products")
 
         from cmp_auth import authenticate_cmp
         from cmp_auth import AuthenticationError
@@ -337,12 +361,12 @@ class TestFragmentBasedSuccessDetection:
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
     def test_rejects_wrong_host_products_url(self):
-        settings = make_test_settings(navigation_timeout_ms=100)
+        settings = make_test_settings(
+            navigation_timeout_ms=100,
+            cmp_products_url="https://evil.example.com/#!products"
+        )
         page = FakePage()
         otp = FakeOtpProvider()
-
-        # Set products URL to wrong host (should be rejected)
-        page.set_products_url("https://evil.example.com/#!products")
 
         from cmp_auth import authenticate_cmp
         from cmp_auth import AuthenticationError
@@ -350,12 +374,12 @@ class TestFragmentBasedSuccessDetection:
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
     def test_rejects_wrong_fragment(self):
-        settings = make_test_settings(navigation_timeout_ms=100)
+        settings = make_test_settings(
+            navigation_timeout_ms=100,
+            cmp_products_url="https://ep.iotcc.telkomsel.com/#!wrong"
+        )
         page = FakePage()
         otp = FakeOtpProvider()
-
-        # Set products URL to wrong fragment (should be rejected)
-        page.set_products_url("https://ep.iotcc.telkomsel.com/#!dashboard")
 
         from cmp_auth import authenticate_cmp
         from cmp_auth import AuthenticationError

@@ -27,6 +27,7 @@ def make_test_settings(**overrides) -> Settings:
         "browser_timeout_ms": 30000,
         "navigation_timeout_ms": 30000,
         "otp_form_timeout_ms": 30000,
+        "otp_clock_skew_tolerance_seconds": 120,
         "refresh_interval_seconds": 60,
         "recovery_retry_limit": 3,
         "recovery_backoff_seconds": 5,
@@ -64,8 +65,8 @@ class FakePage:
     def url(self):
         return self._url
 
-    def goto(self, url, timeout=None):
-        self.goto_calls.append((url, timeout))
+    def goto(self, url, timeout=None, wait_until=None):
+        self.goto_calls.append((url, timeout, wait_until))
         self._navigations.append(url)
         self._url = url
         if "cas/login" in url:
@@ -184,6 +185,7 @@ class TestProductsRedirectBackToDashboard:
         assert page.goto_calls[-1] == (
             settings.cmp_dashboard_url,
             settings.navigation_timeout_ms,
+            "domcontentloaded",
         )
 
 
@@ -447,7 +449,7 @@ class TestUnknownUrlHandling:
         page = FakePage("https://unknown.com")
 
         # Make goto fail
-        def failing_goto(url, timeout=None):
+        def failing_goto(url, timeout=None, wait_until=None):
             raise RuntimeError("Navigation failed")
         page.goto = failing_goto
 
@@ -476,7 +478,7 @@ class TestUnknownUrlHandling:
         page = FakePage("https://unknown.com")
 
         # Navigation succeeds but ends up at non-dashboard URL
-        def goto_wrong_url(url, timeout=None):
+        def goto_wrong_url(url, timeout=None, wait_until=None):
             page._url = "https://ep.iotcc.telkomsel.com/#!other"  # Not dashboard
             page._navigations.append(url)
         page.goto = goto_wrong_url
@@ -496,7 +498,7 @@ class TestUnknownUrlHandling:
         page = FakePage("https://unknown.com")
 
         # Navigation succeeds but ends up at non-dashboard URL
-        def goto_wrong_url(url, timeout=None):
+        def goto_wrong_url(url, timeout=None, wait_until=None):
             page._url = "https://ep.iotcc.telkomsel.com/#!other"
             page._navigations.append(url)
         page.goto = goto_wrong_url
@@ -505,8 +507,8 @@ class TestUnknownUrlHandling:
         otp_provider = FakeOtpProvider()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
-        # First attempt - recovery fails
-        with pytest.raises(RecoveryError):
+        # First attempt: recovery fails, counter=1
+        with pytest.raises(RecoveryError, match="unexpected state"):
             monitor.monitor_once()
         assert monitor._consecutive_recoveries == 1
 
@@ -583,7 +585,7 @@ class TestDashboardReloadRecovery:
         page.reload = reload_to_unknown
 
         # Make goto fail
-        def failing_goto(url, timeout=None):
+        def failing_goto(url, timeout=None, wait_until=None):
             raise RuntimeError("Navigation failed")
         page.goto = failing_goto
 
@@ -608,7 +610,7 @@ class TestDashboardReloadRecovery:
         page.reload = reload_to_unknown
 
         # Navigation succeeds but ends up at non-dashboard URL
-        def goto_wrong_url(url, timeout=None):
+        def goto_wrong_url(url, timeout=None, wait_until=None):
             page._url = "https://ep.iotcc.telkomsel.com/#!other"
             page._navigations.append(url)
         page.goto = goto_wrong_url
@@ -710,4 +712,5 @@ class TestNavigationFailureRecovery:
         assert page.goto_calls[-1] == (
             settings.cmp_dashboard_url,
             settings.navigation_timeout_ms,
+            "domcontentloaded",
         )

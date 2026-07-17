@@ -49,6 +49,7 @@ def make_test_settings() -> Settings:
         browser_timeout_ms=30000,
         navigation_timeout_ms=30000,
         otp_form_timeout_ms=5000,
+        otp_clock_skew_tolerance_seconds=120,
         refresh_interval_seconds=60,
         recovery_retry_limit=3,
         recovery_backoff_seconds=5,

@@ -68,6 +68,7 @@ class Settings:
     navigation_timeout_ms: int
     otp_form_timeout_ms: int
     refresh_interval_seconds: int
+    otp_clock_skew_tolerance_seconds: int
     recovery_retry_limit: int
     recovery_backoff_seconds: int
     headless: bool
@@ -81,6 +82,13 @@ def _environment(
     env_file: str | Path | None = None,
 ) -> dict[str, str]:
     """Load environment variables from .env file and/or provided mapping."""
+    if not env_file:
+        # Check current directory then project root for .env
+        for candidate in [Path(".env"), PROJECT_ROOT / ".env"]:
+            if candidate.exists():
+                env_file = candidate
+                break
+
     values = dict(os.environ)
     if env_file:
         path = Path(env_file)
@@ -259,8 +267,9 @@ def load_settings(
         otp_timeout_seconds=_positive_int(values, "OTP_TIMEOUT_SECONDS", 120),
         run_start_timezone=run_start_timezone,
         browser_timeout_ms=_positive_int(values, "BROWSER_TIMEOUT_MS", 30000),
-        navigation_timeout_ms=_positive_int(values, "NAVIGATION_TIMEOUT_MS", 30000),
-        otp_form_timeout_ms=_positive_int(values, "OTP_FORM_TIMEOUT_MS", 5000),
+        navigation_timeout_ms=_positive_int(values, "NAVIGATION_TIMEOUT_MS", 60000),
+        otp_form_timeout_ms=_positive_int(values, "OTP_FORM_TIMEOUT_MS", 30000),
+        otp_clock_skew_tolerance_seconds=_positive_int(values, "OTP_CLOCK_SKEW_TOLERANCE_SECONDS", 120),
         refresh_interval_seconds=_positive_int(values, "REFRESH_INTERVAL_SECONDS", 60),
         recovery_retry_limit=_positive_int(values, "RECOVERY_RETRY_LIMIT", 3),
         recovery_backoff_seconds=_positive_int(values, "RECOVERY_BACKOFF_SECONDS", 5),

@@ -21,14 +21,14 @@ from dashboard_monitor import ContinuousMonitor, DashboardState, RecoveryError, 
 log = logging.getLogger(__name__)
 
 
-def setup_logging(level: str) -> None:
+def setup_logging(level: str, log_file: str = "monitor.log") -> None:
     """Configure logging with redacted sensitive content."""
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter(
         "[%(asctime)s] %(levelname)s:%(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
-    logging.basicConfig(level=level, handlers=[handler])
+    logging.basicConfig(level=level, handlers=[handler, logging.FileHandler(log_file, encoding="utf-8")])
 
 
 def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = None) -> int:
@@ -51,12 +51,9 @@ def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = Non
     page = None
 
     try:
-        # 2. Create IMAP client
-        log.info("Connecting to IMAP...")
+        # 2. Create IMAP client (object only; connect right before authentication)
         clock = SystemClock()
         imap_client = ImapClient(settings, clock)
-        imap_client.connect()
-        log.info("IMAP connected")
 
         # 3. Launch Firefox browser
         playwright = sync_playwright().start()
@@ -65,12 +62,21 @@ def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = Non
         page = context.new_page()
         log.info("Firefox launched (headless=%s)", settings.headless)
 
-        # 4. Authenticate
+        # 4. Connect IMAP right before authentication to minimize idle time
+        log.info("Connecting to IMAP...")
+        imap_client.connect()
+        log.info("IMAP connected")
+
+        # 5. Authenticate
         authenticate_cmp(settings=settings, otp_provider=imap_client, page=page, clock=clock)
         log.info("Authentication successful")
 
-        # 5. Navigate to dashboard
-        page.goto(settings.cmp_dashboard_url, timeout=settings.navigation_timeout_ms)
+        # 6. Navigate to dashboard
+        page.goto(
+            settings.cmp_dashboard_url,
+            timeout=settings.navigation_timeout_ms,
+            wait_until="domcontentloaded",
+        )
         log.info("Navigated to dashboard")
 
         # 6. Monitor
@@ -116,37 +122,37 @@ def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = Non
         if page is not None:
             try:
                 page.close()
-            except Exception:
+            except (Exception, KeyboardInterrupt):
                 pass
-        
+
         # Close context
         if context is not None:
             try:
                 context.close()
-            except Exception:
+            except (Exception, KeyboardInterrupt):
                 pass
-        
+
         # Close browser
         if browser is not None:
             try:
                 browser.close()
-            except Exception:
+            except (Exception, KeyboardInterrupt):
                 pass
-        
+
         # Stop playwright
         if playwright is not None:
             try:
                 playwright.stop()
-            except Exception:
+            except (Exception, KeyboardInterrupt):
                 pass
         
         # Disconnect IMAP
         if imap_client is not None:
             try:
                 imap_client.disconnect()
-            except Exception:
+            except (Exception, KeyboardInterrupt):
                 pass
-
+        
     return 0
 
 

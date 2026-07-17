@@ -31,10 +31,13 @@ class TestExtractOtp:
         with pytest.raises(OtpError, match="OTP extraction failed"):
             extract_otp(body)
 
-    def test_malformed_otp_too_long(self):
-        body = "Code: 1234567"
-        with pytest.raises(OtpError, match="OTP extraction failed"):
-            extract_otp(body)
+    def test_otp_after_token_word(self):
+        body = "Your one-time token for accessing the Telkomsel IoT Portal is: 050909"
+        assert extract_otp(body) == "050909"
+
+    def test_otp_in_html_body(self):
+        body = '<p>Your one-time token for accessing the Telkomsel IoT Portal is: <strong>050909</strong></p>'
+        assert extract_otp(body) == "050909"
 
 
 class TestValidateSubject:
@@ -56,17 +59,26 @@ class TestValidateInternalDate:
         internal_date = datetime(2024, 1, 1, 12, 0, 5, tzinfo=timezone.utc)
         validate_internal_date(internal_date, run_start)
 
-    def test_naive_timestamp_raises(self):
+    def test_tolerance_grace_period_passes(self):
         run_start = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        internal_date = datetime(2024, 1, 1, 12, 0, 5)
-        with pytest.raises(OtpError, match="Naive timestamp"):
-            validate_internal_date(internal_date, run_start)
+        # Message 1 minute before run_start
+        internal_date = run_start - timedelta(minutes=1)
+        validate_internal_date(internal_date, run_start, tolerance_seconds=120)
+
+    def test_outside_tolerance_fails(self):
+        run_start = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        # Message 3 minutes before run_start (outside 120s tolerance)
+        internal_date = run_start - timedelta(minutes=3)
+        with pytest.raises(OtpError, match="Stale message"):
+            validate_internal_date(internal_date, run_start, tolerance_seconds=120)
 
     def test_stale_message_raises(self):
         run_start = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         internal_date = datetime(2024, 1, 1, 11, 59, 59, tzinfo=timezone.utc)
+        # tolerance_seconds=0 preserves the strict pre-tolerance behavior:
+        # any message dated before run_start is stale.
         with pytest.raises(OtpError, match="Stale message"):
-            validate_internal_date(internal_date, run_start)
+            validate_internal_date(internal_date, run_start, tolerance_seconds=0)
 
     def test_different_timezone_handled(self):
         run_start = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)

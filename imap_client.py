@@ -7,6 +7,7 @@ Opens the configured mailbox read-only and polls for fresh OTP emails.
 from __future__ import annotations
 
 import email
+import email.utils
 import imaplib
 import logging
 import re
@@ -15,8 +16,8 @@ from datetime import datetime, timezone, timedelta
 from email.header import decode_header
 from typing import Protocol
 
-from config import Settings, EXACT_OTP_SUBJECT
-from otp import OtpMessage, extract_otp, find_latest_candidate, OtpError, fetch_and_verify_otp
+from config import Settings
+from otp import OtpMessage, OtpError, fetch_and_verify_otp
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class SystemClock:
 
 
 class OtpProviderProtocol(Protocol):
-    """Protocol for OTP providers."""
+    """Protocol for OTP providers hooking into IMAP."""
     def connect(self) -> None: ...
     def disconnect(self) -> None: ...
     def poll_for_otp(self, run_start: datetime) -> str: ...
@@ -44,15 +45,10 @@ class OtpProviderProtocol(Protocol):
 
 class ImapConnectionError(Exception):
     """Raised when IMAP connection fails with a safe message."""
-    pass
 
 
 class ImapClient:
-    """IMAP adapter for GMF mailbox OTP polling.
-
-    Connects via IMAPS (or STARTTLS), opens the configured mailbox read-only,
-    and polls for fresh OTP emails.
-    """
+    """IMAP adapter for GMF mailbox OTP polling."""
 
     def __init__(
         self,
@@ -62,6 +58,7 @@ class ImapClient:
         self._settings = settings
         self._clock = clock or SystemClock()
         self._connection: imaplib.IMAP4 | None = None
+        self._base_uid: int = 0
 
     def _connect_imap(self) -> imaplib.IMAP4:
         host = self._settings.imap_host
@@ -91,6 +88,12 @@ class ImapClient:
                 raise RuntimeError(f"Failed to select mailbox '{mailbox}'")
             self._connection = conn
             log.info("Connected to IMAP mailbox '%s' (read-only)", mailbox)
+            # Take UID snapshot at initial connect time (before authentication) to avoid
+            # race condition where a previous run's delayed OTP email arrives
+            # during the current run's poll.
+            # On reconnect, reuse the original UID baseline.
+            if self._base_uid == 0:
+                self._take_uid_snapshot()
         except Exception as exc:
             # Clean up partial connection
             if conn is not None:
@@ -106,12 +109,36 @@ class ImapClient:
             # Raise safe exception without sensitive data
             raise ImapConnectionError("IMAP connection failed") from exc
 
+    def _take_uid_snapshot(self) -> None:
+        """Take a snapshot of the highest UID matching OTP criteria.
+
+        Called at connect time (before authentication) to establish a baseline
+        so that only newly arriving OTP emails (higher UID) are accepted.
+        """
+        try:
+            # Use current time as run_start reference; since_date covers 1 day
+            # which is wider than the poll's window but safe for snapshotting.
+            since_date = self._since_cutoff_date(
+                datetime.fromtimestamp(self._clock.now(), tz=timezone.utc)
+            )
+            max_uid = 0
+            for uid in self._search_uids(since_date):
+                uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
+                try:
+                    max_uid = max(max_uid, int(uid_str))
+                except (TypeError, ValueError):
+                    continue
+            self._base_uid = max_uid
+            log.debug("IMAP UID snapshot at connect: %s", self._base_uid)
+        except Exception as exc:
+            log.warning("Failed to take UID snapshot: %s", exc)
+            self._base_uid = 0
+
     def disconnect(self) -> None:
         if self._connection is not None:
             conn = self._connection
             self._connection = None
             # Attempt close and logout independently
-            # Even if close fails, we still try logout
             try:
                 log.info("Closing IMAP connection")
                 conn.close()
@@ -132,19 +159,27 @@ class ImapClient:
                 decoded += part.decode(charset or "utf-8", errors="replace")
             else:
                 decoded += part
-        # Do NOT strip - preserve exact subject including whitespace
-        # CMP - YOUR TOKEN must be exact; CMP - YOUR TOKEN  must be rejected
         return decoded
 
     def _extract_body(self, msg: email.message.Message) -> str:
+        plain_body = ""
+        html_body = ""
         if msg.is_multipart():
             for part in msg.walk():
                 content_type = part.get_content_type()
-                if content_type == "text/plain":
+                if content_type == "text/plain" and not plain_body:
                     payload = part.get_payload(decode=True)
                     if isinstance(payload, bytes):
-                        return payload.decode("utf-8", errors="replace")
-                    return str(payload)
+                        plain_body = payload.decode("utf-8", errors="replace")
+                    else:
+                        plain_body = str(payload)
+                elif content_type == "text/html" and not html_body:
+                    payload = part.get_payload(decode=True)
+                    if isinstance(payload, bytes):
+                        html_body = payload.decode("utf-8", errors="replace")
+                    else:
+                        html_body = str(payload)
+            return plain_body if plain_body else html_body
         else:
             payload = msg.get_payload(decode=True)
             if isinstance(payload, bytes):
@@ -154,70 +189,60 @@ class ImapClient:
 
     def _parse_imap_message(self, msg_uid: str, fetch_data: tuple) -> OtpMessage | None:
         try:
-            _status, data = fetch_data
-            if not data:
+            items = fetch_data[1] if (isinstance(fetch_data, tuple) and len(fetch_data) == 2 and isinstance(fetch_data[0], str)) else fetch_data
+            if not items or not isinstance(items, (list, tuple)):
                 return None
 
-            raw = data[0][1] if isinstance(data[0], tuple) else data[0]
-            if isinstance(raw, bytes):
-                parsed = email.message_from_bytes(raw)
-            else:
-                parsed = email.message_from_string(raw if isinstance(raw, str) else raw.decode("utf-8", errors="replace"))
+            raw_bytes = None
+            for item in items:
+                if isinstance(item, tuple) and len(item) >= 2:
+                    raw_bytes = item[1]
+                    break
 
+            if not raw_bytes or not isinstance(raw_bytes, bytes):
+                return None
+
+            parsed = email.message_from_bytes(raw_bytes)
             uid = msg_uid.decode() if isinstance(msg_uid, bytes) else str(msg_uid)
             subject = self._decode_subject(parsed.get("Subject"))
 
-            # Parse INTERNALDATE from the FETCH response
-            internal_date = self._extract_internal_date(data)
+            internal_date = self._extract_internal_date(items)
             if internal_date is None:
-                log.warning("Message UID %s missing INTERNALDATE, rejecting", uid)
+                date_header = parsed.get("Date")
+                if date_header:
+                    try:
+                        internal_date = email.utils.parsedate_to_datetime(date_header)
+                    except Exception:
+                        internal_date = None
+
+            if internal_date is None:
+                log.warning("Message UID %s missing/invalid INTERNALDATE and Date, rejecting", uid)
                 return None
 
             body = self._extract_body(parsed)
-
             return OtpMessage(uid=uid, subject=subject, internal_date=internal_date, body=body)
-        except Exception:
-            log.warning("Failed to parse IMAP message")
+        except Exception as exc:
+            log.warning("Failed to parse IMAP message UID %s: %s", msg_uid, exc)
             return None
 
     def _extract_internal_date(self, fetch_data: tuple) -> datetime | None:
-        """Extract INTERNALDATE from IMAP FETCH response.
-
-        The FETCH response format is typically:
-        (UID <uid> INTERNALDATE "<date>" BODY[...])
-
-        We need to parse the raw FETCH response to get the INTERNALDATE.
-        """
-        try:
-            _status, data = fetch_data
-            if not data:
-                return None
-
-            # The first element of data is the FETCH response line
-            # It contains metadata like UID, INTERNALDATE, etc.
-            fetch_line = data[0]
-            if isinstance(fetch_line, tuple):
-                fetch_line = fetch_line[0]
-
-            if not isinstance(fetch_line, bytes):
-                fetch_line = fetch_line.encode('utf-8')
-
-            # Parse INTERNALDATE from the FETCH response line
-            # Example: b'1 (UID 5 INTERNALDATE "01-Jan-2024 12:34:56 +0000" BODY[] {123}'
-            match = re.search(rb'INTERNALDATE\s+"([^"]+)"', fetch_line)
-            if match:
-                date_str = match.group(1).decode('ascii')
-                # Parse IMAP date format: "01-Jan-2024 12:34:56 +0000"
-                return self._parse_imap_date(date_str)
-        except Exception:
-            log.warning("Failed to extract INTERNALDATE from FETCH response")
+        items = fetch_data[1] if (isinstance(fetch_data, tuple) and len(fetch_data) == 2 and isinstance(fetch_data[0], str)) else fetch_data
+        if not isinstance(items, (list, tuple)):
+            return None
+        for item in items:
+            if isinstance(item, tuple) and len(item) >= 1:
+                header_line = item[0]
+                if not isinstance(header_line, bytes):
+                    header_line = str(header_line).encode("utf-8")
+                match = re.search(rb'INTERNALDATE\s+"([^"]+)"', header_line, re.IGNORECASE)
+                if match:
+                    date_str = match.group(1).decode("ascii", errors="replace")
+                    return self._parse_imap_date(date_str)
         return None
 
     def _parse_imap_date(self, date_str: str) -> datetime | None:
-        """Parse IMAP INTERNALDATE format: '01-Jan-2024 12:34:56 +0000'"""
         try:
-            # IMAP date format: DD-Mon-YYYY HH:MM:SS +ZZZZ
-            match = re.match(r'(\d{2})-(\w{3})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+([+-]\d{4})', date_str)
+            match = re.match(r'\s*(\d{1,2})-(\w{3})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+([+-]\d{4})', date_str)
             if not match:
                 return None
 
@@ -230,87 +255,157 @@ class ImapClient:
             if month is None:
                 return None
 
-            # Parse timezone offset
             tz_sign = 1 if tz[0] == '+' else -1
             tz_hours = int(tz[1:3])
             tz_minutes = int(tz[3:5])
             tz_offset = tz_sign * (tz_hours * 3600 + tz_minutes * 60)
             tzinfo = timezone(timedelta(seconds=tz_offset))
-
-            return datetime(
-                int(year), month, int(day),
-                int(hour), int(minute), int(second),
-                tzinfo=tzinfo
-            )
+            
+            return datetime(int(year), month, int(day), int(hour), int(minute), int(second), tzinfo=tzinfo)
         except Exception:
             return None
 
-    def _search_uids(self) -> list[bytes]:
-        """Search for message UIDs using UID SEARCH."""
-        if self._connection is None:
-            raise RuntimeError("IMAP connection not established")
-        status, msg_uids = self._connection.uid("search", None, "ALL")
-        if status != "OK" or not msg_uids or not msg_uids[0]:
+    def _search_uids(self, since_date: str | None = None) -> list[bytes]:
+        """Search for candidate UIDs.
+
+        When ``since_date`` (IMAP ``SINCE`` date, e.g. ``6-Aug-2026``) is given,
+        restrict the search to messages from that date with the configured OTP
+        subject. Otherwise fall back to searching the whole mailbox (used by
+        callers that only need the raw UID list).
+
+        Fetching every message in a large mailbox is very slow (the full body of
+        every message is transferred), so the OTP poll must always narrow the
+        search instead of using ``ALL``.
+        """
+        if not self._connection:
             return []
-        return msg_uids[0].split()
+        if since_date:
+            criteria = (
+                f'(SINCE "{since_date}" HEADER Subject '
+                f'"{self._settings.otp_subject}")'
+            )
+        else:
+            criteria = "ALL"
+        status, data = self._connection.uid("search", None, criteria)
+        if status != "OK":
+            return []
+        return data[0].split()
 
-    def fetch_messages(self) -> list[OtpMessage]:
-        """Fetch all messages from the configured mailbox using UID FETCH."""
-        if self._connection is None:
-            raise RuntimeError("IMAP connection not established")
-
-        msg_uids = self._search_uids()
-        messages: list[OtpMessage] = []
-
-        for msg_uid in msg_uids:
-            status, data = self._connection.uid("fetch", msg_uid, "(INTERNALDATE BODY.PEEK[])")
-            if status != "OK" or not data:
-                continue
-            parsed = self._parse_imap_message(msg_uid, data)
-            if parsed is not None:
-                messages.append(parsed)
-
-        return messages
-
-    def recheck(self, uid: str) -> OtpMessage | None:
-        """Recheck that a message with the given UID still exists and hasn't changed."""
-        if self._connection is None:
-            raise RuntimeError("IMAP connection not established")
-
-        try:
-            status, data = self._connection.uid("fetch", uid, "(INTERNALDATE BODY.PEEK[])")
-            if status != "OK" or not data:
-                return None
-            return self._parse_imap_message(uid, data)
-        except Exception:
+    def _fetch_message(self, uid: str) -> tuple | None:
+        if not self._connection:
             return None
+        status, data = self._connection.uid("fetch", uid, "(INTERNALDATE BODY.PEEK[])")
+        if status != "OK":
+            return None
+        return data
 
-    def poll_for_otp(self, run_start: datetime) -> str:
-        """Poll for a fresh valid OTP email within the configured timeout.
+    def _refresh_mailbox(self) -> None:
+        """Refresh the mailbox view with NOOP so new emails are visible.
 
-        Returns the extracted OTP value.
-        Raises OtpError on timeout.
+        Falls back to re-selecting the configured mailbox read-only if the
+        NOOP fails (e.g. stale connection).
         """
         if self._connection is None:
             raise RuntimeError("IMAP connection not established")
+        try:
+            self._connection.noop()
+        except Exception:
+            log.warning("NOOP failed, re-selecting mailbox")
+            status, _ = self._connection.select(self._settings.imap_mailbox, readonly=True)
+            if status != "OK":
+                raise RuntimeError("Failed to re-select mailbox")
+
+    def _since_cutoff_date(self, run_start: datetime) -> str:
+        """IMAP SINCE date covering the acceptance window.
+
+        IMAP ``SINCE`` compares against the server's internal date (usually UTC),
+        so subtract a full day from the login timestamp to absorb timezone and
+        server-clock differences while keeping the candidate set small.
+        """
+        cutoff = run_start - timedelta(days=1)
+        return f"{cutoff.day}-{cutoff.strftime('%b')}-{cutoff.year}"
+
+    def poll_for_otp(self, run_start: datetime) -> str:
+        if not self._connection:
+            raise RuntimeError("IMAP connection not established")
 
         deadline = self._clock.now() + self._settings.otp_timeout_seconds
+        since_date = self._since_cutoff_date(run_start)
 
-        log.info("Polling for OTP (timeout=%.0fs)", self._settings.otp_timeout_seconds)
+        # Use the UID snapshot taken at connect time (before authentication).
+        # Fall back to taking a fresh snapshot if not available.
+        max_uid_at_start = self._base_uid
+        if max_uid_at_start == 0:
+            try:
+                for uid in self._search_uids(since_date):
+                    uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
+                    try:
+                        max_uid_at_start = max(max_uid_at_start, int(uid_str))
+                    except (TypeError, ValueError):
+                        continue
+            except Exception:
+                max_uid_at_start = 0
+        log.debug("Polling for OTP with base UID %s", max_uid_at_start)
+
+        log.info(
+            "Polling for OTP via IMAP (timeout=%ds, since=%s).",
+            self._settings.otp_timeout_seconds,
+            since_date,
+        )
 
         while self._clock.now() < deadline:
-            messages = self.fetch_messages()
-
             try:
+                self._refresh_mailbox()
+                uids = self._search_uids(since_date)
+                messages: list[OtpMessage] = []
+                for uid in uids:
+                    uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
+                    try:
+                        if int(uid_str) <= max_uid_at_start:
+                            # Leftover message from a previous login attempt.
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+                    fetch_data = self._fetch_message(uid_str)
+                    if fetch_data:
+                        msg = self._parse_imap_message(uid, fetch_data)
+                        if msg:
+                            messages.append(msg)
+
+                if messages:
+                    newest = max(m.internal_date for m in messages)
+                    log.debug(
+                        "Poll iteration: %d candidate(s), newest date=%s",
+                        len(messages),
+                        newest.isoformat(),
+                    )
+
                 otp = fetch_and_verify_otp(
-                    messages=messages,
-                    run_start=run_start,
-                    recheck=self.recheck,
+                    messages,
+                    run_start,
+                    self._recheck_uid,
+                    self._settings.otp_clock_skew_tolerance_seconds
                 )
-                log.info("OTP extracted successfully")
+                log.info("OTP retrieved successfully")
                 return otp
             except OtpError:
                 self._clock.sleep(self._settings.otp_poll_interval_seconds)
-                continue
+            except (imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError) as exc:
+                log.warning(
+                    "IMAP connection error during polling: %s, reconnecting.",
+                    type(exc).__name__,
+                )
+                try:
+                    self.disconnect()
+                    self.connect()
+                except Exception:
+                    log.warning("IMAP reconnect failed, will retry")
+                self._clock.sleep(self._settings.otp_poll_interval_seconds)
 
         raise OtpError("OTP polling timed out")
+
+    def _recheck_uid(self, uid: str) -> OtpMessage | None:
+        fetch_data = self._fetch_message(uid)
+        if fetch_data:
+            return self._parse_imap_message(uid.encode(), fetch_data)
+        return None

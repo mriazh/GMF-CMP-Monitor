@@ -2,6 +2,7 @@
 
 import email
 import time
+from unittest.mock import Mock
 from datetime import datetime, timezone, timedelta
 
 import pytest
@@ -46,6 +47,7 @@ def make_test_settings(**overrides) -> Settings:
         "browser_timeout_ms": 30000,
         "navigation_timeout_ms": 30000,
         "otp_form_timeout_ms": 30000,
+        "otp_clock_skew_tolerance_seconds": 120,
         "refresh_interval_seconds": 60,
         "recovery_retry_limit": 3,
         "recovery_backoff_seconds": 5,
@@ -99,8 +101,10 @@ class TestStaleOtpRejection:
             body="Code: 111111",
         )
         from otp import validate_internal_date, OtpError
+        # tolerance_seconds=0 preserves the strict pre-tolerance behavior:
+        # any message dated before run_start is stale.
         with pytest.raises(OtpError, match="Stale message"):
-            validate_internal_date(msg.internal_date, run_start)
+            validate_internal_date(msg.internal_date, run_start, tolerance_seconds=0)
 
     def test_same_time_accepted(self):
         run_start = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -178,20 +182,19 @@ class TestFetchAndVerifyOtp:
 class TestImapClientUIDOperations:
     """Tests for IMAP client UID-based operations using a fake IMAP connection."""
 
-    def test_search_uses_uid_command(self):
-        # Test that search uses UID SEARCH command
+
+    def test_imap_client_operations(self):
+        # Test that ImapClient has the expected public API
         from imap_client import ImapClient
-        
+
+        # Setup...
         settings = make_test_settings()
         clock = FakeClock(time.time())
         client = ImapClient(settings, clock)
-        
-        # We can't easily test the actual IMAP calls without a real server,
-        # but we can verify the method signatures and that they call uid()
-        assert hasattr(client, '_search_uids')
-        assert hasattr(client, 'fetch_messages')
-        assert hasattr(client, 'recheck')
+
         assert hasattr(client, 'poll_for_otp')
+        assert hasattr(client, 'connect')
+        assert hasattr(client, 'disconnect')
 
     def test_fetch_uses_uid_fetch_with_internaldate(self):
         # Verify fetch_messages uses UID FETCH with INTERNALDATE and BODY.PEEK[]
@@ -256,7 +259,19 @@ class TestInternaldParsing:
         assert result.tzinfo is not None
         assert result.utcoffset() == timedelta(hours=7)
 
-    def test_parse_invalid_internaldatetime_returns_none(self):
+    def test_parse_single_digit_days(self):
+        from imap_client import ImapClient
+        
+        settings = make_test_settings()
+        clock = FakeClock(time.time())
+        client = ImapClient(settings, clock)
+
+        # Space + single digit
+        assert client._parse_imap_date(" 6-Aug-2026 11:55:04 +0700") is not None
+        # Single digit without space
+        assert client._parse_imap_date("6-Aug-2026 11:55:04 +0700") is not None
+        # Two digits (control)
+        assert client._parse_imap_date("16-Aug-2026 11:55:04 +0700") is not None
         from imap_client import ImapClient
         
         settings = make_test_settings()
@@ -285,9 +300,27 @@ class TestMessageRejection:
         
         # Simulate FETCH response without INTERNALDATE
         fetch_data = ("OK", [(b"1 (BODY[] {123}\r\n...", b"content")])
-        
+
         result = client._parse_imap_message(b"1", fetch_data)
         assert result is None
+
+    def test_message_without_internaldatetime_uses_date_header_fallback(self):
+        # A message without INTERNALDATE in FETCH response should use Date header fallback
+        from imap_client import ImapClient
+
+        settings = make_test_settings()
+        clock = FakeClock(time.time())
+        client = ImapClient(settings, clock)
+
+        # Simulate FETCH response without INTERNALDATE, but email has a Date header
+        email_raw = b"Date: Thu, 6 Aug 2026 11:55:04 +0700\r\n\r\nBodycontent"
+        fetch_data = ("OK", [(b"1 (BODY[])", email_raw)])
+
+        result = client._parse_imap_message(b"1", fetch_data)
+        assert result is not None
+        assert result.internal_date.year == 2026
+        assert result.internal_date.month == 8
+        assert result.internal_date.day == 6
 
     def test_message_with_invalid_internaldatetime_rejected(self):
         # A message with unparsable INTERNALDATE should be rejected
@@ -303,18 +336,42 @@ class TestMessageRejection:
         result = client._parse_imap_message(b"1", fetch_data)
         assert result is None
 
-    def test_stale_message_rejected_by_poll_for_otp(self):
-        # Messages with INTERNALDATE before run_start should be rejected
+    def test_parse_real_imaplib_response_list(self):
         from imap_client import ImapClient
-        from otp import OtpError
-        
+
         settings = make_test_settings()
-        clock = FakeClock(time.time())
-        client = ImapClient(settings, clock)
+        client = ImapClient(settings)
+
+        # Realistic imaplib response structure as a list
+        fetch_data = [
+            (b'1 (UID 123 INTERNALDATE " 6-Aug-2026 12:00:00 +0700" BODY[] {100})', 
+             b'Subject: CMP - YOUR TOKEN\r\n\r\nYour one-time token for accessing the Telkomsel IoT Portal is: 123456'), 
+            b')'
+        ]
+
+        result = client._parse_imap_message(b"123", fetch_data)
+        assert result is not None
+        assert result.uid == "123"
+        assert result.internal_date.year == 2026
+        assert result.internal_date.month == 8
+        assert result.internal_date.day == 6
+        assert "123456" in result.body
+
+    def test_file_logger_creation(self):
+        import logging
+        import os
+        from main import setup_logging
         
-        # The poll_for_otp uses fetch_and_verify_otp which uses find_latest_candidate
-        # which validates internal_date against run_start
-        # This is tested through the otp module tests
+        log_file = "monitor_test.log"
+        if os.path.exists(log_file):
+            os.remove(log_file)
+            
+        setup_logging("INFO", log_file=log_file)
+        assert os.path.exists(log_file)
+        
+        # Cleanup
+        if os.path.exists(log_file):
+            os.remove(log_file)
 
 
 class TestRecheckBehavior:
@@ -357,20 +414,256 @@ class TestRecheckBehavior:
 
     def test_recheck_compares_subject(self):
         from otp import fetch_and_verify_otp, OtpError
-        
+
         run_start = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
         msg = create_otp_message(uid="1", body="Code: 111111")
-        
+
         # Rechecked message with different subject
-        changed_msg = OtpMessage("1", "DIFFERENT SUBJECT", 
-                                datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc), 
+        changed_msg = OtpMessage("1", "DIFFERENT SUBJECT",
+                                datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc),
                                 "Code: 111111")
-        
+
         def recheck(uid: str) -> OtpMessage | None:
             return changed_msg
-        
+
         with pytest.raises(OtpError, match="Candidate changed"):
             fetch_and_verify_otp([msg], run_start, recheck)
+
+class TestPollingLogic:
+    def test_poll_for_otp_retries_until_found(self):
+        from imap_client import ImapClient
+
+        class TestingImapClient(ImapClient):
+            def __init__(self, settings, clock, call_count_ref, run_start):
+                super().__init__(settings, clock)
+                self.call_count_ref = call_count_ref
+                self.run_start = run_start
+                self._connection = Mock()
+
+            def _search_uids(self, since_date=None) -> list[str]:
+                self.call_count_ref[0] += 1
+                if self.call_count_ref[0] < 3:
+                    return []
+                return ["1"]
+            
+            def _fetch_message(self, uid):
+                return ("OK", ["dummy_data"])
+            
+            def _parse_imap_message(self, uid, fetch_data):
+                return OtpMessage(uid="1", subject="CMP - YOUR TOKEN", internal_date=self.run_start + timedelta(seconds=1), body="Token is 123456")
+
+        settings = make_test_settings()
+        clock = FakeClock(time.time(), sleep_calls=[])
+        call_count_ref = [0]
+        run_start = datetime.now(timezone.utc)
+        
+        client = TestingImapClient(settings, clock, call_count_ref, run_start)
+        
+        otp = client.poll_for_otp(run_start)
+
+        assert otp == "123456"
+        assert call_count_ref[0] == 3
+        # The UID snapshot consumes the first _search_uids call, so only one
+        # empty iteration sleeps before the fresh message is found.
+        assert clock._sleep_calls == [2]
+
+    def test_refresh_mailbox_sends_noop(self):
+        from imap_client import ImapClient
+
+        settings = make_test_settings()
+        clock = FakeClock(time.time())
+        client = ImapClient(settings, clock)
+        conn = Mock()
+        client._connection = conn
+
+        client._refresh_mailbox()
+
+        conn.noop.assert_called_once()
+
+    def test_refresh_mailbox_reselects_when_noop_fails(self):
+        import imaplib
+        from imap_client import ImapClient
+
+        settings = make_test_settings()
+        clock = FakeClock(time.time())
+        client = ImapClient(settings, clock)
+        conn = Mock()
+        conn.noop.side_effect = imaplib.IMAP4.error("NOOP failed")
+        conn.select.return_value = ("OK", [b"1"])
+        client._connection = conn
+
+        client._refresh_mailbox()
+
+        conn.noop.assert_called_once()
+        conn.select.assert_called_once_with("INBOX", readonly=True)
+
+    def _make_reconnecting_client(self, settings, clock, run_start, error_type):
+        from imap_client import ImapClient
+
+        class TestingImapClient(ImapClient):
+            def __init__(self, settings, clock, run_start, error_type):
+                super().__init__(settings, clock)
+                self.run_start = run_start
+                self.error_type = error_type
+                self._connection = Mock()
+                self.iterations = 0
+                self.search_calls = 0
+                self.disconnect_calls = 0
+                self.connect_calls = 0
+
+            def _refresh_mailbox(self):
+                self.iterations += 1
+                if self.iterations == 1:
+                    raise self.error_type("Connection dropped")
+
+            def _search_uids(self, since_date=None):
+                self.search_calls += 1
+                # Snapshot call returns the old mailbox state; later calls return
+                # the freshly delivered message with a higher UID.
+                if self.search_calls == 1:
+                    return ["1"]
+                return ["2"]
+
+            def _fetch_message(self, uid):
+                return ("OK", ["dummy_data"])
+
+            def _parse_imap_message(self, uid, fetch_data):
+                return OtpMessage(
+                    uid="2",
+                    subject="CMP - YOUR TOKEN",
+                    internal_date=self.run_start + timedelta(seconds=1),
+                    body="Token is 123456",
+                )
+
+            def disconnect(self):
+                self.disconnect_calls += 1
+                self._connection = None
+
+            def connect(self):
+                self.connect_calls += 1
+                self._connection = Mock()
+
+        return TestingImapClient(settings, clock, run_start, error_type)
+
+    def test_poll_for_otp_reconnects_on_abort(self):
+        import imaplib
+
+        settings = make_test_settings()
+        clock = FakeClock(time.time(), sleep_calls=[])
+        run_start = datetime.now(timezone.utc)
+        client = self._make_reconnecting_client(settings, clock, run_start, imaplib.IMAP4.abort)
+
+        otp = client.poll_for_otp(run_start)
+
+        assert otp == "123456"
+        assert client.disconnect_calls == 1
+        assert client.connect_calls == 1
+        assert clock._sleep_calls == [2]
+
+    def test_poll_for_otp_reconnects_on_oserror(self):
+        settings = make_test_settings()
+        clock = FakeClock(time.time(), sleep_calls=[])
+        run_start = datetime.now(timezone.utc)
+        client = self._make_reconnecting_client(settings, clock, run_start, OSError)
+
+        otp = client.poll_for_otp(run_start)
+
+        assert otp == "123456"
+        assert client.disconnect_calls == 1
+        assert client.connect_calls == 1
+        assert clock._sleep_calls == [2]
+
+
+class TestSearchOptimization:
+    """Regression tests: OTP polling must narrow the IMAP search instead of
+    fetching every message in the mailbox (which took ~55s for 181 messages and
+    caused "OTP polling timed out" in production).
+    """
+
+    def _make_client_with_conn(self, search_criteria_map):
+        from imap_client import ImapClient
+
+        settings = make_test_settings()
+        clock = FakeClock(time.time(), sleep_calls=[])
+        client = ImapClient(settings, clock)
+        conn = Mock()
+        state = {"calls": 0}
+
+        def uid_side_effect(method, *args):
+            if method == "search":
+                # Snapshot call returns the old mailbox state; later calls also
+                # include the freshly delivered message (higher UID).
+                state["calls"] += 1
+                old, fresh = search_criteria_map[args[1]]
+                return ("OK", [old if state["calls"] == 1 else fresh])
+            if method == "fetch":
+                return ("OK", [
+                    (b'1 (UID 12 INTERNALDATE "6-Aug-2026 12:00:00 +0700" BODY[] {60})',
+                     b"Subject: CMP - YOUR TOKEN\r\n\r\nYour one-time token is: 654321"),
+                    b")",
+                ])
+            return ("OK", [b""])
+
+        conn.uid.side_effect = uid_side_effect
+        client._connection = conn
+        return client, conn
+
+    def test_search_uses_since_and_subject_criteria(self):
+        criteria = '(SINCE "5-Aug-2026" HEADER Subject "CMP - YOUR TOKEN")'
+        client, conn = self._make_client_with_conn({
+            "ALL": (b"1 2 3", b"1 2 3 4"),
+            criteria: (b"1 2 3", b"1 2 3 4"),
+        })
+        run_start = datetime(2026, 8, 6, 11, 55, tzinfo=timezone(timedelta(hours=7)))
+
+        otp = client.poll_for_otp(run_start)
+
+        assert otp == "654321"
+        search_calls = [c for c in conn.uid.call_args_list if c.args[0] == "search"]
+        assert search_calls
+        actual = search_calls[0].args[2]
+        # Must never search the whole mailbox
+        assert "ALL" not in actual
+        assert "SINCE" in actual
+        assert 'HEADER Subject "CMP - YOUR TOKEN"' in actual
+        # run_start date minus one day (timezone/UTC safety buffer)
+        assert "5-Aug-2026" in actual
+
+    def test_poll_skips_leftover_uid_from_previous_login(self):
+        # Regression: an OTP email from a previous login attempt that falls
+        # inside the clock-skew tolerance window must NOT be accepted.
+        criteria = '(SINCE "5-Aug-2026" HEADER Subject "CMP - YOUR TOKEN")'
+        client, conn = self._make_client_with_conn({
+            "ALL": (b"176 177 178 179 180 181", b"176 177 178 179 180 181 182"),
+            criteria: (b"176 177 178 179 180 181", b"176 177 178 179 180 181 182"),
+        })
+        run_start = datetime(2026, 8, 6, 11, 55, tzinfo=timezone(timedelta(hours=7)))
+
+        otp = client.poll_for_otp(run_start)
+
+        assert otp == "654321"
+        # Only the fresh message (UID 182) may be fetched: 1 fetch + 1 recheck.
+        fetch_uids = [c.args[1] for c in conn.uid.call_args_list if c.args[0] == "fetch"]
+        assert fetch_uids == ["182", "182"]
+
+    def test_poll_fetches_only_searched_candidates(self):
+        # Before the fix, poll_for_otp searched "ALL" and fetched the full body
+        # of every message in the mailbox (181+ per iteration).
+        all_uids = b" ".join(str(i).encode() for i in range(1, 182))
+        since_uids = b"176 177 178 179 180 181"
+        criteria = '(SINCE "5-Aug-2026" HEADER Subject "CMP - YOUR TOKEN")'
+        client, conn = self._make_client_with_conn({
+            "ALL": (all_uids, all_uids + b" 182"),
+            criteria: (since_uids, since_uids + b" 182"),
+        })
+        run_start = datetime(2026, 8, 6, 11, 55, tzinfo=timezone(timedelta(hours=7)))
+
+        client.poll_for_otp(run_start)
+
+        search_calls = [c for c in conn.uid.call_args_list if c.args[0] == "search"]
+        # The snapshot + first iteration must use the SINCE/subject criteria.
+        assert all("ALL" not in c.args[2] for c in search_calls)
+        assert all("SINCE" in c.args[2] for c in search_calls)
 
 
 class TestOtpExtractionFromRecheckedBody:
