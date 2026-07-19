@@ -71,7 +71,9 @@ def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = Non
         authenticate_cmp(settings=settings, otp_provider=imap_client, page=page, clock=clock)
         log.info("Authentication successful")
 
-        # 6. Navigate to dashboard via SPA menu (fallback: direct goto)
+        # 6. Navigate to dashboard via the real SPA menu click (never a direct
+        #    goto to #!dashboard: a direct navigation changes the URL without
+        #    rendering the dashboard view).
         navigate_to_dashboard(page, settings)
         log.info("Navigated to dashboard")
 

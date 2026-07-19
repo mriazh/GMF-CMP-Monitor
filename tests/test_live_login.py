@@ -21,6 +21,7 @@ def test_live_login_to_dashboard():
     imap_client = ImapClient(settings, clock)
     imap_client.connect()
 
+    browser = None
     try:
         with sync_playwright() as playwright:
             browser = playwright.firefox.launch(headless=settings.headless)
@@ -31,8 +32,13 @@ def test_live_login_to_dashboard():
             authenticated = authenticate_cmp(settings=settings, otp_provider=imap_client, page=page, clock=clock)
             assert authenticated is True
 
-            # Navigate to dashboard via SPA menu click (fallback: direct goto)
+            # Navigate to dashboard via real SPA menu click
             assert navigate_to_dashboard(page, settings, clock) is True
             assert classify_state(page) == DashboardState.DASHBOARD
     finally:
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
         imap_client.disconnect()

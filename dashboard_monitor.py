@@ -2,6 +2,12 @@
 
 Monitors the Telkomsel CMP dashboard for GMF, periodically refreshing
 and handling session expiry.
+
+All dashboard navigation is performed by clicking the real Vaadin SPA
+menu item. Direct navigation to ``#!dashboard`` is NEVER used: a direct
+``page.goto`` changes ``page.url`` without actually rendering the
+dashboard view, which produces a false-positive dashboard detection
+(the Vaadin router later resets the hash to ``#!products``).
 """
 
 from __future__ import annotations
@@ -10,12 +16,30 @@ import logging
 import time
 from enum import Enum, auto
 from typing import Protocol
+from urllib.parse import urlparse
 
-from config import Settings
+from config import Settings, APPROVED_CMP_HOST
 from cmp_auth import authenticate_cmp, AuthenticationError
 from imap_client import OtpProviderProtocol
 
 log = logging.getLogger(__name__)
+
+# SPA menu selectors verified against the Vaadin DOM during live sessions.
+DASHBOARD_MENU_SELECTOR = "span.main-menu-item-caption"
+DASHBOARD_MENU_TEXT = "Dashboard"
+# Selected-menu item and view DOM signals verified against live Vaadin DOM.
+# Note: Vaadin places the .selected class on the parent div container,
+# not the child caption span.
+DASHBOARD_SELECTED_SELECTOR = "div.main-menu-item.selected"
+DASHBOARD_VIEW_SELECTOR = "div.dashboard-view"
+
+# Poll interval (seconds) for state/menu/verification polls.
+POLL_INTERVAL_SECONDS = 1.0
+# Number of consecutive verified polls required before a dashboard is accepted.
+VERIFIED_DASHBOARD_POLLS = 2
+# Bounded observation period (seconds) for a dashboard URL whose UI is not
+# verified before staging recovery through the products URL.
+INCONSISTENT_DASHBOARD_OBSERVE_SECONDS = 3.0
 
 
 class Clock(Protocol):
@@ -50,18 +74,26 @@ class RecoveryError(Exception):
     pass
 
 
+class AuthenticationRequiredError(RecoveryError):
+    """Raised when the page needs re-authentication during dashboard navigation.
+
+    Subclasses RecoveryError so generic recovery handlers still treat it as a
+    navigation failure, while navigation callers can trigger a fresh login.
+    """
+    pass
+
+
 def classify_state(page: object) -> DashboardState:
     """Classify current page state based on URL.
 
     Returns DashboardState enum based on URL parsing:
     - DASHBOARD: HTTPS, approved host, fragment #!dashboard
     - PRODUCTS: HTTPS, approved host, fragment #!products
-    - AUTH_EXPIRED: HTTPS, approved host, /cas/ path with visible login form or OTP form
+    - AUTH_EXPIRED: HTTPS, approved host, /session-closed or /cas/login with a
+      visible login/OTP form
     - UNKNOWN: anything else (including foreign-host lookalikes)
     """
-    from urllib.parse import urlparse
-
-    url = page.url if hasattr(page, 'url') else ""
+    url = getattr(page, "url", "")
     if not url:
         return DashboardState.UNKNOWN
 
@@ -72,7 +104,7 @@ def classify_state(page: object) -> DashboardState:
         return DashboardState.UNKNOWN
 
     # Must be on approved host
-    if parsed.hostname != "ep.iotcc.telkomsel.com":
+    if parsed.hostname != APPROVED_CMP_HOST:
         return DashboardState.UNKNOWN
 
     # Check fragment for dashboard/products
@@ -80,6 +112,10 @@ def classify_state(page: object) -> DashboardState:
         return DashboardState.DASHBOARD
     elif parsed.fragment == "!products":
         return DashboardState.PRODUCTS
+
+    # Session-closed endpoint on the approved host indicates an expired session
+    if parsed.path.startswith("/session-closed"):
+        return DashboardState.AUTH_EXPIRED
 
     # Check for CAS/login paths on approved host
     if parsed.path in ("/cas/login", "/cas/login/"):
@@ -97,55 +133,263 @@ def classify_state(page: object) -> DashboardState:
     return DashboardState.UNKNOWN
 
 
-def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> bool:
-    """Click the Dashboard item in the SPA menu and wait for the dashboard state.
+def _dashboard_dom_ready(page: object) -> bool:
+    """Check the Vaadin DOM for a stable dashboard-ready signal.
 
-    Returns True if the menu click led to the dashboard state. Falls back to the
-    text locator if the main-menu-item-caption locator is not visible/present.
+    Looks for a selected Dashboard menu item or a dashboard-specific visible
+    container. Any failure returns False; the URL alone is never trusted.
     """
     try:
-        menu = page.locator("span.main-menu-item-caption", has_text="Dashboard").first
-        if not hasattr(menu, "is_visible") or not menu.is_visible():
-            menu = page.get_by_text("Dashboard", exact=True)
-        menu.click()
+        selected = page.locator(DASHBOARD_SELECTED_SELECTOR, has_text=DASHBOARD_MENU_TEXT).first
+        if hasattr(selected, "is_visible") and selected.is_visible():
+            return True
+        container = page.locator(DASHBOARD_VIEW_SELECTOR).first
+        if hasattr(container, "is_visible") and container.is_visible():
+            return True
     except Exception:
-        log.info("SPA Dashboard menu click failed; falling back to direct navigation")
+        pass
+    return False
+
+
+def _is_verified_dashboard(page: object) -> bool:
+    """True only when URL, window.location.hash and DOM all confirm dashboard.
+
+    This is the real dashboard verifier: it requires the approved HTTPS URL
+    with the ``!dashboard`` fragment, ``window.location.hash == "#!dashboard"``
+    and a dashboard-ready DOM signal.
+    """
+    try:
+        url = getattr(page, "url", "")
+        if not url:
+            return False
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != APPROVED_CMP_HOST
+            or parsed.fragment != "!dashboard"
+        ):
+            return False
+        if hasattr(page, "evaluate"):
+            if page.evaluate("window.location.hash") != "#!dashboard":
+                return False
+        return _dashboard_dom_ready(page)
+    except Exception:
         return False
 
+
+def _log_dashboard_dom_diagnostics(page: object) -> None:
+    """Emit safe DEBUG diagnostics about the dashboard menu and DOM.
+
+    Reports only: the current normalized route state, whether
+    ``window.location.hash`` equals ``#!dashboard``, whether the Dashboard
+    caption exists, its class names, the tag/class names of a small number of
+    ancestors, and whether candidate dashboard containers exist. Never logs
+    HTML, page text beyond the literal menu label, credentials, cookies,
+    execution tokens, or URLs containing query parameters.
+    """
+    if not log.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        try:
+            route_state = classify_state(page).name
+        except Exception:
+            route_state = "?"
+        hash_ok = False
+        try:
+            if hasattr(page, "evaluate"):
+                hash_ok = page.evaluate("window.location.hash") == "#!dashboard"
+        except Exception:
+            hash_ok = False
+        menu = page.locator(DASHBOARD_MENU_SELECTOR, has_text=DASHBOARD_MENU_TEXT).first
+        exists = False
+        classes = None
+        ancestors = None
+        if hasattr(menu, "is_visible"):
+            exists = menu.is_visible()
+        if exists and hasattr(menu, "get_attribute"):
+            try:
+                classes = menu.get_attribute("class")
+            except Exception:
+                classes = None
+        if exists and hasattr(menu, "evaluate"):
+            try:
+                ancestors = menu.evaluate(
+                    "el => { const chain = []; let n = el; "
+                    "for (let i = 0; n && i < 4; i++, n = n.parentElement) { "
+                    "const cls = (n.className || '').split(/\\s+/).filter(Boolean).join('.'); "
+                    "chain.push(n.tagName + (cls ? '.' + cls : '')); } "
+                    "return chain.join(' < '); }"
+                )
+            except Exception:
+                ancestors = None
+        selected_exists = False
+        view_exists = False
+        try:
+            sel = page.locator(DASHBOARD_SELECTED_SELECTOR, has_text=DASHBOARD_MENU_TEXT).first
+            if hasattr(sel, "is_visible"):
+                selected_exists = sel.is_visible()
+        except Exception:
+            pass
+        try:
+            view = page.locator(DASHBOARD_VIEW_SELECTOR).first
+            if hasattr(view, "is_visible"):
+                view_exists = view.is_visible()
+        except Exception:
+            pass
+        log.debug(
+            "Dashboard DOM diagnostics: state=%s hash_ok=%s caption_exists=%s "
+            "classes=%r ancestors=%r selected=%s view=%s",
+            route_state, hash_ok, exists, classes, ancestors,
+            selected_exists, view_exists,
+        )
+    except Exception:
+        pass
+
+
+def _visible_dashboard_menu(page: object) -> object | None:
+    """Return the visible, exact-text Dashboard menu item locator or None."""
+    try:
+        menu = page.locator(DASHBOARD_MENU_SELECTOR, has_text=DASHBOARD_MENU_TEXT).first
+        if not hasattr(menu, "is_visible") or not menu.is_visible():
+            return None
+        # Exact-text guard: the caption must end with "Dashboard" (allowing font icon prefixes like \ue900).
+        if hasattr(menu, "inner_text"):
+            text = menu.inner_text().strip()
+            if not text.endswith(DASHBOARD_MENU_TEXT):
+                return None
+        return menu
+    except Exception:
+        return None
+
+
+def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> bool:
+    """Wait for the Dashboard menu item, click it, and verify a stable dashboard.
+
+    The menu item may render late (the Vaadin SPA shell loads asynchronously), so
+    it is polled once per second until visible. The menu is then clicked and the
+    route/UI verification (URL + hash + DOM) is polled.
+
+    The click is only repeated with positive evidence of a completed bounce: the
+    page first left Products and later returned to Products. The menu
+    is never re-clicked merely because the Products URL remains unchanged while
+    the first navigation is still loading.
+
+    Raises AuthenticationRequiredError if the page moves to CAS login or
+    /session-closed while waiting. Raises RecoveryError on timeout.
+    """
     deadline = clock.now() + (settings.navigation_timeout_ms / 1000.0)
+    clicked = False
+    left_products_seen = False
+    verified_polls = 0
+    # Throttled diagnostics for post-click unverified Dashboard state
+    last_diag_time = None
+    diag_count = 0
     while clock.now() < deadline:
-        if classify_state(page) == DashboardState.DASHBOARD:
-            return True
-        clock.sleep(0.1)
-    return False
+        state = classify_state(page)
+        if state == DashboardState.AUTH_EXPIRED:
+            raise AuthenticationRequiredError(
+                "Authentication required during dashboard navigation"
+            )
+        if _is_verified_dashboard(page):
+            verified_polls += 1
+            if verified_polls >= VERIFIED_DASHBOARD_POLLS:
+                log.info("Dashboard verified (URL, hash, DOM)")
+                return True
+            log.debug("Dashboard verified once; confirming")
+            clock.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
+        verified_polls = 0
+
+        if clicked:
+            # An in-flight click: wait for the route transition. Only re-click
+            # with positive evidence of a completed bounce (the page left
+            # Products and later returned).
+            if state != DashboardState.PRODUCTS:
+                # The route moved away from Products: the click was consumed.
+                left_products_seen = True
+                log.debug("Menu click in flight; route left products (state=%s)", state.name)
+            else:
+                can_retry = left_products_seen
+                if not can_retry:
+                    log.debug("Menu click in flight; waiting for route transition")
+                else:
+                    # Confirmed bounce: exactly one retry per observed round-trip.
+                    # Reset ``clicked`` so the next poll attempts the real menu
+                    # click again (the route left Products and returned).
+                    left_products_seen = False
+                    clicked = False
+                    log.info("Confirmed bounce back to products; retrying Dashboard menu click")
+            # Post-click verification pending: emit throttled diagnostics for
+            # every route state (Products, unknown, or unverified Dashboard
+            # URL). First failure logs immediately, then at most once per 10s.
+            now = clock.now()
+            if last_diag_time is None or now - last_diag_time >= 10.0:
+                _log_dashboard_dom_diagnostics(page)
+                last_diag_time = now
+                diag_count += 1
+                log.debug(
+                    "Dashboard unverified after click (poll %d): state=%s",
+                    diag_count, state.name,
+                )
+            clock.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
+        menu = _visible_dashboard_menu(page)
+        if menu is None:
+            _log_dashboard_dom_diagnostics(page)
+            log.debug("Dashboard menu not visible yet; waiting")
+            clock.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
+        log.info("Clicking SPA Dashboard menu item")
+        try:
+            menu.click()
+            clicked = True
+            left_products_seen = False
+        except Exception:
+            log.debug("Dashboard menu click failed; will retry")
+        clock.sleep(POLL_INTERVAL_SECONDS)
+    # Final diagnostic before timeout
+    _log_dashboard_dom_diagnostics(page)
+    log.error("Dashboard verification timed out after %.0fs", settings.navigation_timeout_ms / 1000.0)
+    raise RecoveryError("Dashboard navigation failed: could not verify dashboard")
 
 
 def navigate_to_dashboard(
     page: object, settings: Settings, clock: Clock | None = None
 ) -> bool:
-    """Navigate to the dashboard via the SPA menu, falling back to a direct goto.
+    """Navigate to the dashboard via the real SPA menu item.
 
-    Returns True on success. Raises RecoveryError if the dashboard cannot be
-    reached through either the menu click or a direct navigation.
+    NEVER navigates directly to #!dashboard. If the SPA shell is not loaded
+    (unknown state), first navigate to the products URL to render the menu,
+    then wait for and click the Dashboard menu item. Verifies a stable
+    dashboard state (URL + hash + DOM across two consecutive polls) before
+    returning.
+
+    Raises AuthenticationRequiredError if re-authentication is needed.
+    Raises RecoveryError if the dashboard cannot be verified.
     """
     if clock is None:
         clock = SystemClock()
 
-    if _click_dashboard_menu(page, settings, clock):
-        return True
-
-    try:
-        page.goto(
-            settings.cmp_dashboard_url,
-            timeout=settings.navigation_timeout_ms,
-            wait_until="domcontentloaded",
+    state = classify_state(page)
+    if state == DashboardState.AUTH_EXPIRED:
+        raise AuthenticationRequiredError(
+            "Authentication required during dashboard navigation"
         )
-    except Exception as nav_exc:
-        raise RecoveryError("Dashboard navigation failed") from nav_exc
+    if state == DashboardState.UNKNOWN:
+        log.info("Unknown state; navigating to products to load the SPA shell")
+        try:
+            page.goto(
+                settings.cmp_products_url,
+                timeout=settings.navigation_timeout_ms,
+                wait_until="domcontentloaded",
+            )
+        except Exception as nav_exc:
+            raise RecoveryError("Dashboard navigation failed") from nav_exc
 
-    if classify_state(page) != DashboardState.DASHBOARD:
-        raise RecoveryError("Dashboard recovery failed: unexpected state")
-    return True
+    return _click_dashboard_menu(page, settings, clock)
 
 
 class ContinuousMonitor:
@@ -180,7 +424,7 @@ class ContinuousMonitor:
                  backoff, self._consecutive_recoveries, self._settings.recovery_retry_limit)
         self._clock.sleep(backoff)
 
-        # Try to navigate back to dashboard (SPA menu click, then direct goto)
+        # Try to navigate back to dashboard via the real SPA menu click
         try:
             navigate_to_dashboard(self._page, self._settings, self._clock)
         except RecoveryError:
@@ -206,71 +450,26 @@ class ContinuousMonitor:
             log.info("Current state: %s", current_state)
 
             if current_state == DashboardState.DASHBOARD:
-                self._clock.sleep(self._settings.refresh_interval_seconds)
-                try:
-                    self._page.reload()
-                except Exception:
-                    log.error("Dashboard reload failed; starting bounded recovery")
-                    return self._recover_to_dashboard()
-                new_state = classify_state(self._page)
+                return self._monitor_dashboard_state()
+            if current_state == DashboardState.PRODUCTS:
+                log.info("Redirected to products; navigating to dashboard")
+                return self._handle_products_state()
+            if current_state == DashboardState.AUTH_EXPIRED:
+                log.info("Session expired; initiating re-authentication")
+                return self._relogin_and_navigate()
 
-                if new_state == DashboardState.PRODUCTS:
-                    log.info("Navigating back to dashboard")
-                    try:
-                        navigate_to_dashboard(self._page, self._settings, self._clock)
-                    except RecoveryError:
-                        self._recover_to_dashboard()
-                    else:
-                        self._consecutive_recoveries = 0
-                    return False
-                elif new_state == DashboardState.AUTH_EXPIRED:
-                    log.info("Session expired, initiating re-authentication")
-                    self._perform_relogin()
-                    # Verify dashboard state before resetting counter
-                    if classify_state(self._page) == DashboardState.DASHBOARD:
-                        self._consecutive_recoveries = 0
-                    return True
-                elif new_state == DashboardState.DASHBOARD:
-                    # Still at dashboard - normal case
-                    self._consecutive_recoveries = 0
-                else:
-                    # Unknown state after reload - invoke bounded recovery
-                    log.warning("Unknown state detected after reload, initiating recovery")
-                    return self._recover_to_dashboard()
-
-                return False
-
-            elif current_state == DashboardState.PRODUCTS:
-                log.info("Redirected to products, navigating to dashboard")
-                try:
-                    navigate_to_dashboard(self._page, self._settings, self._clock)
-                except RecoveryError:
-                    log.error("Navigation to dashboard failed; starting bounded recovery")
-                    return self._recover_to_dashboard()
-                else:
-                    self._consecutive_recoveries = 0
-                return False
-
-            elif current_state == DashboardState.AUTH_EXPIRED:
-                log.info("Session expired, initiating re-authentication")
-                self._perform_relogin()
-                # Verify dashboard state before resetting counter
-                if classify_state(self._page) == DashboardState.DASHBOARD:
-                    self._consecutive_recoveries = 0
-                return True
-
-            else:
-                # Unknown state - handle with bounded recovery
-                log.warning("Unknown state detected, initiating recovery")
-                return self._recover_to_dashboard()
+            log.warning("Unknown state detected; initiating bounded recovery")
+            return self._recover_to_dashboard()
 
         except RecoveryExhaustedError:
             # Already handled in _recover_to_dashboard or _check_recovery_limit
-            # Do not increment counter again
             raise
+        except AuthenticationRequiredError:
+            # Dashboard navigation hit a login/session-closed page: re-login.
+            log.info("Authentication required during monitoring; re-authenticating")
+            return self._relogin_and_navigate()
         except RecoveryError:
-            # Recovery navigation failed, counter already incremented in _recover_to_dashboard
-            # Do not increment again
+            # Recovery navigation failed, counter already incremented
             raise
         except Exception as exc:
             # Do not log raw exception (may contain sensitive data)
@@ -280,13 +479,196 @@ class ContinuousMonitor:
             # Re-raise to avoid silently masking errors
             raise
 
+    def _monitor_dashboard_state(self) -> bool:
+        """Wait for the refresh interval while polling the state once per second.
+
+        Steady-state verification does not trust the URL alone: every one-second
+        poll must confirm the verified dashboard condition (URL + hash + DOM).
+        If the URL reports dashboard but the UI verification fails for two
+        consecutive polls, the state is treated as inconsistent and the monitor
+        recovers through Products and the real Dashboard menu click. URL state
+        and verified UI state are logged separately.
+        """
+        deadline = self._clock.now() + self._settings.refresh_interval_seconds
+        log.info("Monitoring dashboard; next refresh in %.0fs", self._settings.refresh_interval_seconds)
+        unverified_polls = 0
+        while self._clock.now() < deadline:
+            self._clock.sleep(POLL_INTERVAL_SECONDS)
+            state = classify_state(self._page)
+            if state == DashboardState.DASHBOARD:
+                verified = _is_verified_dashboard(self._page)
+                log.debug("Dashboard state: %s | verified UI: %s", state.name, verified)
+                if verified:
+                    unverified_polls = 0
+                    continue
+                unverified_polls += 1
+                _log_dashboard_dom_diagnostics(self._page)
+                log.warning(
+                    "Dashboard URL but UI not verified (%d/%d consecutive polls)",
+                    unverified_polls, VERIFIED_DASHBOARD_POLLS,
+                )
+                if unverified_polls >= VERIFIED_DASHBOARD_POLLS:
+                    log.info("Dashboard UI inconsistent; starting inconsistent-dashboard recovery")
+                    return self._handle_inconsistent_dashboard()
+                continue
+            if state == DashboardState.PRODUCTS:
+                log.info("Dashboard changed to PRODUCTS; navigating back to dashboard")
+                return self._handle_products_state()
+            if state == DashboardState.AUTH_EXPIRED:
+                log.info("Session expired while waiting; re-authenticating")
+                return self._relogin_and_navigate()
+            log.warning("Dashboard changed to unknown state; bounded recovery")
+            return self._recover_to_dashboard()
+
+        # Refresh interval expired while still on the dashboard: reload.
+        return self._handle_refresh()
+
+    def _handle_products_state(self) -> bool:
+        """Navigate from products back to the verified dashboard via the SPA menu."""
+        try:
+            navigate_to_dashboard(self._page, self._settings, self._clock)
+        except AuthenticationRequiredError:
+            log.info("Authentication required during dashboard navigation; re-authenticating")
+            return self._relogin_and_navigate()
+        except RecoveryError:
+            log.error("Navigation to dashboard failed; starting bounded recovery")
+            return self._recover_to_dashboard()
+        # Only reset the counter after a verified dashboard state.
+        self._consecutive_recoveries = 0
+        return False
+
+    def _handle_inconsistent_dashboard(self) -> bool:
+        """Recover from a dashboard URL whose UI is not verified.
+
+        The URL reports dashboard but the real Vaadin UI does not confirm it.
+        Observe for a short bounded period: if the real state settles on
+        products or session expiry, the normal handlers are used. If the page
+        remains on an unverified dashboard URL, the SPA shell is staged through
+        the products URL and the real Dashboard menu item is clicked. Never
+        navigates directly to #!dashboard.
+        """
+        observe_deadline = self._clock.now() + INCONSISTENT_DASHBOARD_OBSERVE_SECONDS
+        log.info(
+            "Dashboard URL inconsistent with UI; observing for %.0fs",
+            INCONSISTENT_DASHBOARD_OBSERVE_SECONDS,
+        )
+        while self._clock.now() < observe_deadline:
+            self._clock.sleep(POLL_INTERVAL_SECONDS)
+            state = classify_state(self._page)
+            if state == DashboardState.AUTH_EXPIRED:
+                log.info("Session expired during dashboard verification; re-authenticating")
+                return self._relogin_and_navigate()
+            if state == DashboardState.PRODUCTS:
+                log.info("Dashboard inconsistency resolved to products; menu-clicking dashboard")
+                return self._handle_products_state()
+            if state == DashboardState.DASHBOARD and _is_verified_dashboard(self._page):
+                log.info("Dashboard UI verified during observation")
+                self._consecutive_recoveries = 0
+                return False
+            _log_dashboard_dom_diagnostics(self._page)
+            log.debug("Dashboard still unverified (state=%s)", state.name)
+
+        # Observation period elapsed with the URL still reporting an unverified
+        # dashboard: stage through the products URL to reload the SPA shell,
+        # then click the real Dashboard menu item.
+        log.info("Dashboard UI unverified after observation; staging via products")
+        try:
+            self._page.goto(
+                self._settings.cmp_products_url,
+                timeout=self._settings.navigation_timeout_ms,
+                wait_until="domcontentloaded",
+            )
+        except Exception as nav_exc:
+            log.error("Products staging navigation failed: %s", type(nav_exc).__name__)
+            return self._recover_to_dashboard()
+        try:
+            navigate_to_dashboard(self._page, self._settings, self._clock)
+        except AuthenticationRequiredError:
+            log.info("Authentication required while staging to dashboard; re-authenticating")
+            return self._relogin_and_navigate()
+        except RecoveryError:
+            log.error("Dashboard menu navigation failed after staging; bounded recovery")
+            return self._recover_to_dashboard()
+        self._consecutive_recoveries = 0
+        return False
+
+    def _handle_refresh(self) -> bool:
+        """Reload the dashboard and handle the post-reload route transition."""
+        try:
+            self._page.reload()
+        except Exception:
+            log.error("Dashboard reload failed; starting bounded recovery")
+            return self._recover_to_dashboard()
+
+        log.info("Dashboard reloaded; waiting for route transition")
+        try:
+            settled = self._wait_for_route_settle()
+        except RecoveryError:
+            log.error("Route did not settle after reload; starting bounded recovery")
+            return self._recover_to_dashboard()
+
+        if settled == DashboardState.PRODUCTS:
+            log.info("Portal reset to PRODUCTS after refresh; navigating back to dashboard")
+            return self._handle_products_state()
+        if settled == DashboardState.AUTH_EXPIRED:
+            log.info("Session expired after refresh; re-authenticating")
+            return self._relogin_and_navigate()
+        if settled == DashboardState.DASHBOARD:
+            log.info("Dashboard verified after refresh")
+            self._consecutive_recoveries = 0
+            return False
+        log.warning("Unknown state after refresh; bounded recovery")
+        return self._recover_to_dashboard()
+
+    def _wait_for_route_settle(self) -> DashboardState:
+        """Poll once per second after reload for the Vaadin route transition.
+
+        PRODUCTS and AUTH_EXPIRED are definitive route outcomes and are
+        returned immediately when detected. DASHBOARD is only accepted after
+        the verified dashboard condition (URL + hash + DOM) holds for two
+        consecutive polls, so the initial stale post-reload URL is never
+        trusted. UNKNOWN is only accepted after two consecutive polls so a
+        transient unknown right after a reload does not trigger an immediate
+        recovery. Raises RecoveryError on timeout.
+        """
+        deadline = self._clock.now() + (self._settings.navigation_timeout_ms / 1000.0)
+        verified_polls = 0
+        unknown_polls = 0
+        while self._clock.now() < deadline:
+            self._clock.sleep(POLL_INTERVAL_SECONDS)
+            state = classify_state(self._page)
+            if state == DashboardState.DASHBOARD:
+                unknown_polls = 0
+                if _is_verified_dashboard(self._page):
+                    verified_polls += 1
+                    if verified_polls >= VERIFIED_DASHBOARD_POLLS:
+                        log.info("Post-reload route settled on verified DASHBOARD")
+                        return DashboardState.DASHBOARD
+                    log.debug("Post-reload dashboard verified once; confirming")
+                else:
+                    verified_polls = 0
+                    log.debug("Post-reload URL reports dashboard but UI not verified")
+                continue
+            verified_polls = 0
+            if state in (DashboardState.PRODUCTS, DashboardState.AUTH_EXPIRED):
+                log.info("Post-reload route settled on %s", state)
+                return state
+            # UNKNOWN: only accepted after consecutive polls so a transient
+            # unknown right after reload does not trigger immediate recovery.
+            unknown_polls += 1
+            if unknown_polls >= 2:
+                log.info("Post-reload route settled on UNKNOWN (consecutive polls)")
+                return DashboardState.UNKNOWN
+            log.debug("Post-reload UNKNOWN (%d consecutive); confirming", unknown_polls)
+        raise RecoveryError("Route did not settle after reload")
+
     def _perform_relogin(self) -> None:
         """Perform full re-authentication flow.
 
         authenticate_cmp records a fresh login attempt timestamp (via the
         injected clock and configured timezone), obtains a new OTP, and
-        completes the full CAS login flow. We then navigate back to the
-        dashboard.
+        completes the full CAS login flow, finishing on the products page.
+        We then click the real SPA Dashboard menu to reach the dashboard.
         """
         log.info("Requesting new OTP for re-authentication")
         authenticate_cmp(
@@ -296,17 +678,21 @@ class ContinuousMonitor:
             clock=self._clock,
         )
 
-        # Navigate back to dashboard
-        self._page.goto(
-            self._settings.cmp_dashboard_url,
-            timeout=self._settings.navigation_timeout_ms,
-            wait_until="domcontentloaded",
-        )
-        # Verify we're at dashboard
-        if classify_state(self._page) != DashboardState.DASHBOARD:
-            log.error("Relogin navigation did not reach dashboard")
-            raise RecoveryError("Relogin failed: did not reach dashboard")
+        # Navigate back to dashboard via the real SPA menu click (never a
+        # direct goto to #!dashboard).
+        navigate_to_dashboard(self._page, self._settings, self._clock)
         log.info("Re-authentication successful, navigated to dashboard")
+
+    def _relogin_and_navigate(self) -> bool:
+        """Re-authenticate and navigate to the verified dashboard."""
+        try:
+            self._perform_relogin()
+        except (RecoveryError, AuthenticationRequiredError):
+            log.error("Relogin navigation failed; starting bounded recovery")
+            return self._recover_to_dashboard()
+        # Only reset the counter after a verified dashboard state.
+        self._consecutive_recoveries = 0
+        return True
 
     def _check_recovery_limit(self) -> None:
         """Check if recovery limit has been exceeded."""
@@ -315,8 +701,6 @@ class ContinuousMonitor:
             raise RecoveryExhaustedError(
                 f"Maximum recovery attempts ({self._settings.recovery_retry_limit}) exceeded"
             )
-
-        # Note: backoff sleep is now handled by _recover_to_dashboard to avoid double sleep
 
     def shutdown(self) -> None:
         """Shutdown the monitor."""

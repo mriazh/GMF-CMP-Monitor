@@ -1,7 +1,15 @@
-"""Tests for dashboard monitoring - all offline, using fake objects."""
+"""Tests for dashboard monitoring - all offline, using fake objects.
+
+The fakes model the real Vaadin SPA behavior: a direct ``page.goto`` to
+``#!dashboard`` changes the URL but does NOT render the dashboard view, so
+``_is_verified_dashboard`` stays False until the real Dashboard menu item is
+clicked. Delayed route transitions (post-reload resets to products, menu
+click bounces) are modelled with scheduled transitions.
+"""
 
 import pytest
 from datetime import datetime
+from urllib.parse import urlparse
 
 from config import Settings, SecretValue
 
@@ -41,7 +49,13 @@ def make_test_settings(**overrides) -> Settings:
 
 
 class FakePage:
-    """Fake Playwright page supporting the CAS auth flow and dashboard navigation."""
+    """Fake Playwright page modelling the Vaadin SPA dashboard navigation.
+
+    Key modelling rule: ``goto`` to ``#!dashboard`` changes the URL but never
+    makes the dashboard "ready" (no selected menu item, no dashboard view), so
+    the false-positive detection the real portal exhibits is reproduced here.
+    The dashboard only becomes ready when the real menu item is clicked.
+    """
 
     def __init__(self, initial_url="", url=None):
         if url is not None:
@@ -56,28 +70,120 @@ class FakePage:
         self.default_timeout = 30000
         self._state = "initial"
         self._products_url = "https://ep.iotcc.telkomsel.com/#!products"
-        self._menu_visible = False
         self._dashboard_url = "https://ep.iotcc.telkomsel.com/#!dashboard"
+        self._menu_visible = False
+        self._menu_after = None
+        self._menu_clicks = 0
+        self._dashboard_ready = "#!dashboard" in self._url
+        self._pending = None
+        self._post_reload = None
+        self._menu_bounce = None
+        self._post_click_transition = None
+        self._hash_override = None
+        self._click_delay_reads = None
+        self._click_transition_delay = None
+        self._ready_after = None
         if "cas/login" in self._url:
             self._state = "cas"
             self._locator_visible["#username"] = True
             self._locator_visible["#password"] = True
+        elif "#!products" in self._url:
+            self._state = "products"
+        elif "#!dashboard" in self._url:
+            self._state = "dashboard"
+
+    # -- state machine -------------------------------------------------
 
     @property
     def url(self):
+        if self._pending is not None:
+            self._pending["remaining"] -= 1
+            if self._pending["remaining"] <= 0:
+                self._apply_transition(self._pending)
+                self._pending = None
+                # Chain post-click transition if configured (for hard bounce)
+                if self._post_click_transition is not None:
+                    # Convert after_reads to remaining for the next transition
+                    self._pending = {
+                        "remaining": self._post_click_transition["after_reads"],
+                        "url": self._post_click_transition["url"],
+                        "state": self._post_click_transition["state"],
+                    }
+                    self._post_click_transition = None
+        if self._ready_after is not None:
+            self._ready_after -= 1
+            if self._ready_after <= 0:
+                self._dashboard_ready = True
+                self._ready_after = None
         return self._url
+
+    def _apply_transition(self, config):
+        """Apply a scheduled Vaadin route transition."""
+        self._url = config["url"]
+        self._state = config.get("state", "initial")
+        # A route change never renders the dashboard view on its own unless the
+        # transition explicitly carries a ready dashboard (used by the delayed
+        # menu-click transition mode).
+        self._dashboard_ready = bool(config.get("ready", False))
+        if "cas/login" in self._url:
+            self._state = "cas"
+            self._locator_visible["#username"] = True
+            self._locator_visible["#password"] = True
+            self._locator_visible["#token"] = False
+        else:
+            self._locator_visible["#username"] = False
+            self._locator_visible["#password"] = False
+            self._locator_visible["#token"] = False
+            if "#!products" in self._url:
+                self._state = "products"
+            elif "#!dashboard" in self._url:
+                self._state = "dashboard"
+
+    # -- Playwright-like API -------------------------------------------
 
     def goto(self, url, timeout=None, wait_until=None):
         self.goto_calls.append((url, timeout, wait_until))
         self._navigations.append(url)
         self._url = url
+        # Direct navigation never renders the Vaadin dashboard view.
+        self._dashboard_ready = False
         if "cas/login" in url:
             self._state = "cas"
             self._locator_visible["#username"] = True
             self._locator_visible["#password"] = True
+            self._locator_visible["#token"] = False
         else:
             self._locator_visible["#username"] = False
             self._locator_visible["#password"] = False
+            self._locator_visible["#token"] = False
+            if "#!products" in url:
+                self._state = "products"
+            elif "#!dashboard" in url:
+                self._state = "dashboard"
+            else:
+                self._state = "initial"
+
+    def reload(self):
+        self._navigations.append(self._url)
+        # A reload resets the Vaadin SPA: the URL may still report dashboard
+        # but the UI is not ready until the router settles.
+        self._dashboard_ready = False
+        self._locator_visible["#token"] = False
+        if self._post_reload is not None:
+            self._pending = {
+                "remaining": self._post_reload["after_reads"],
+                "url": self._post_reload["url"],
+                "state": self._post_reload["state"],
+            }
+
+    def evaluate(self, expression):
+        if "location.hash" in expression:
+            if self._hash_override is not None:
+                return self._hash_override
+            return "#" + urlparse(self._url).fragment
+        if "location.href" in expression:
+            return self._url
+        return None
 
     def set_default_timeout(self, timeout):
         self.default_timeout = timeout
@@ -85,7 +191,7 @@ class FakePage:
     def fill(self, selector, value):
         self.fills[selector] = value
 
-    def click(self, selector):
+    def click(self, selector, timeout=None, **kwargs):
         self.clicks.append(selector)
         if selector == "#fm1 input[name='submit'][type='submit']":
             if self._state == "cas":
@@ -109,19 +215,37 @@ class FakePage:
             return True
         return None
 
-    def reload(self):
-        self._navigations.append(self._url)
-
     def locator(self, selector, has_text=None):
         if selector == "span.main-menu-item-caption":
+            if self._menu_after is not None:
+                self._menu_after -= 1
+                if self._menu_after <= 0:
+                    self._menu_visible = True
+                    self._menu_after = None
             return FakeMenuLocator(self, has_text=has_text, visible=self._menu_visible)
+        if selector in ("span.main-menu-item-caption.selected", "div.main-menu-item.selected"):
+            return FakeMenuLocator(self, has_text=has_text, visible=self._dashboard_ready)
+        if selector == "div.dashboard-view":
+            return FakeLocator(self._dashboard_ready)
         return FakeLocator(self._locator_visible.get(selector, False))
 
     def get_by_text(self, text, exact=False):
         return FakeMenuLocator(self, has_text=text, visible=self._menu_visible)
 
+    # -- test helpers ---------------------------------------------------
+
     def set_menu_visible(self, visible=True):
         self._menu_visible = visible
+
+    def set_menu_visible_after_reads(self, n):
+        """Make the Dashboard menu appear only after n visibility polls."""
+        self._menu_after = n
+
+    def set_dashboard_ready(self, ready=True):
+        self._dashboard_ready = ready
+
+    def set_hash(self, value):
+        self._hash_override = value
 
     def set_products_url(self, url):
         self._products_url = url
@@ -133,7 +257,59 @@ class FakePage:
         self._locator_visible["#username"] = True
         self._locator_visible["#password"] = True
         self._locator_visible["#token"] = False
+        self._dashboard_ready = False
         self._navigations.append(self._url)
+
+    def schedule_transition(self, target_url, target_state, after_reads=1):
+        """Schedule a Vaadin route transition to fire after N url reads."""
+        self._pending = {"remaining": after_reads, "url": target_url, "state": target_state}
+
+    def set_post_reload(self, target_url, target_state, after_reads=1):
+        """Make the next reload() settle on target_url after N url reads."""
+        self._post_reload = {"after_reads": after_reads, "url": target_url, "state": target_state}
+
+    def set_menu_click_bounce(self, target_url, target_state, after_reads=2, via_dashboard=False):
+        """Make the next menu click bounce back after N url reads (once).
+
+        If ``via_dashboard=True``, models a hard bounce: the click first transitions
+        to the dashboard URL (with dashboard not ready), then after ``after_reads``
+        more url reads transitions to ``target_url``/``target_state``. This models
+        a route round-trip (products -> dashboard -> products) that the real
+        Vaadin router may perform when a navigation is rejected.
+        """
+        if via_dashboard:
+            # Hard bounce: first go to dashboard, then to target
+            self._menu_bounce = {
+                "after_reads": after_reads,
+                "url": self._dashboard_url,
+                "state": "dashboard",
+                "ready": False,
+                "bounce_back": {"after_reads": after_reads, "url": target_url, "state": target_state},
+            }
+        else:
+            # Soft bounce: direct transition to target (legacy behavior)
+            self._menu_bounce = {"after_reads": after_reads, "url": target_url, "state": target_state}
+
+    def set_click_delay_reads(self, n):
+        """Make the next menu click render the dashboard view after N url reads.
+
+        Models a slow Vaadin route transition: the URL updates immediately on
+        click but the dashboard DOM only becomes ready after n more url reads.
+        """
+        self._click_delay_reads = n
+
+    def set_click_transition_delay(self, n):
+        """Delay BOTH the URL/hash transition AND the dashboard DOM on the next click.
+
+        Models a slow real-world Vaadin transition: after clicking Dashboard
+        neither the URL nor the DOM changes for n url reads; only then does the
+        page transition to the dashboard URL with the dashboard DOM ready.
+        """
+        self._click_transition_delay = n
+
+    @property
+    def menu_clicks(self):
+        return self._menu_clicks
 
 
 class FakeMenuLocator:
@@ -151,12 +327,60 @@ class FakeMenuLocator:
     def is_visible(self):
         return self._visible
 
+    def inner_text(self):
+        return self._has_text or "Dashboard"
+
     def click(self):
         if not self._visible:
             raise RuntimeError("Dashboard menu not visible")
-        self._page._url = self._page._dashboard_url
-        self._page._state = "dashboard"
+        self._page._menu_clicks += 1
         self._page._navigations.append(self._page._dashboard_url)
+        if self._page._click_transition_delay is not None:
+            # Model a slow real-world Vaadin transition: neither the URL/hash
+            # nor the dashboard DOM changes for a while after the click; only
+            # after n more url reads does the page transition to the dashboard
+            # URL with the dashboard DOM ready.
+            delay = self._page._click_transition_delay
+            self._page._click_transition_delay = None
+            self._page._pending = {
+                "remaining": delay,
+                "url": self._page._dashboard_url,
+                "state": "dashboard",
+                "ready": True,
+            }
+        elif self._page._click_delay_reads is not None:
+            # Model a slow Vaadin route transition: the URL updates
+            # immediately but the dashboard view only becomes ready after a
+            # few more url reads (simulating a delayed render).
+            self._page._url = self._page._dashboard_url
+            self._page._state = "dashboard"
+            self._page._dashboard_ready = False
+            self._page._ready_after = self._page._click_delay_reads
+            self._page._click_delay_reads = None
+        elif self._page._menu_bounce is not None:
+            bounce = self._page._menu_bounce
+            self._page._menu_bounce = None
+            if "bounce_back" in bounce:
+                # Hard bounce: first transition to dashboard, then bounce back
+                self._page._pending = {
+                    "remaining": bounce["after_reads"],
+                    "url": bounce["url"],
+                    "state": bounce["state"],
+                    "ready": bounce.get("ready", False),
+                }
+                self._page._post_click_transition = bounce["bounce_back"]
+            else:
+                # Soft bounce: direct transition to target
+                self._page._pending = {
+                    "remaining": bounce["after_reads"],
+                    "url": bounce["url"],
+                    "state": bounce["state"],
+                }
+        else:
+            # Immediate transition to dashboard with DOM ready
+            self._page._url = self._page._dashboard_url
+            self._page._state = "dashboard"
+            self._page._dashboard_ready = True
 
 
 class FakeLocator:
@@ -196,34 +420,6 @@ class FakeOtpProvider:
     def poll_for_otp(self, run_start: datetime) -> str:
         self.poll_calls.append(run_start)
         return self.otp_value
-
-
-class TestProductsRedirectBackToDashboard:
-    def test_products_to_dashboard(self):
-        from dashboard_monitor import classify_state, DashboardState
-
-        page = FakePage(url="https://ep.iotcc.telkomsel.com/#!products")
-        state = classify_state(page)
-        assert state == DashboardState.PRODUCTS
-
-        # Now trigger monitor_once
-        from dashboard_monitor import ContinuousMonitor
-        otp_provider = FakeOtpProvider()
-        monitor = ContinuousMonitor(
-            settings=make_test_settings(),
-            page=page,
-            otp_provider=otp_provider,
-            clock=FakeClock(),
-        )
-
-        monitor.monitor_once()
-        # Should have navigated to dashboard with the configured timeout.
-        settings = make_test_settings()
-        assert page.goto_calls[-1] == (
-            settings.cmp_dashboard_url,
-            settings.navigation_timeout_ms,
-            "domcontentloaded",
-        )
 
 
 class TestDashboardStateClassification:
@@ -316,64 +512,100 @@ class TestDashboardStateClassification:
         page._locator_visible["#password"] = False
         assert classify_state(page) == DashboardState.AUTH_EXPIRED
 
+    def test_session_closed_path_is_auth_expired(self):
+        from dashboard_monitor import classify_state, DashboardState
+        # Session-closed endpoint on the approved host triggers auto-relogin
+        page = FakePage("https://ep.iotcc.telkomsel.com/session-closed?locale=en")
+        assert classify_state(page) == DashboardState.AUTH_EXPIRED
 
-class TestSessionExpiryTriggeringReLogin:
-    def test_auth_expired_triggers_relogin(self):
-        from dashboard_monitor import classify_state
+    def test_foreign_host_session_closed_is_unknown(self):
+        from dashboard_monitor import classify_state, DashboardState
+        # Foreign-host session-closed lookalike must stay UNKNOWN (strict host check)
+        page = FakePage("https://evil.example.com/session-closed?locale=en")
+        assert classify_state(page) == DashboardState.UNKNOWN
 
+
+class TestVerifiedDashboard:
+    """The real dashboard verifier requires URL + hash + DOM together."""
+
+    def test_requires_url_hash_and_dom(self):
+        from dashboard_monitor import _is_verified_dashboard, _dashboard_dom_ready
+        # URL and hash correct but DOM not ready -> not verified
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_dashboard_ready(False)
+        assert not _is_verified_dashboard(page)
+        # DOM ready -> verified
+        page.set_dashboard_ready(True)
+        assert _is_verified_dashboard(page)
+        assert _dashboard_dom_ready(page)
+
+    def test_hash_mismatch_is_not_verified(self):
+        from dashboard_monitor import _is_verified_dashboard
+        # URL reports dashboard but window.location.hash disagrees
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_dashboard_ready(True)
+        page.set_hash("#!products")
+        assert not _is_verified_dashboard(page)
+
+    def test_goto_dashboard_does_not_make_dashboard_ready(self):
+        from dashboard_monitor import _is_verified_dashboard
+        # A direct goto to #!dashboard changes the URL but never renders the
+        # Vaadin dashboard view, so it must NOT count as verified.
         settings = make_test_settings()
-        page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.goto(settings.cmp_dashboard_url, timeout=1000, wait_until="commit")
+        assert page.url == settings.cmp_dashboard_url
+        assert not _is_verified_dashboard(page)
 
-        from dashboard_monitor import ContinuousMonitor
-        otp_provider = FakeOtpProvider()
-        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider)
-        result = monitor.monitor_once()
-
-        # Should return True to indicate re-auth performed
-        assert result is True
-        # Should have requested exactly one OTP (no double polling)
-        assert len(otp_provider.poll_calls) == 1
-        # Should have navigated to dashboard after relogin
-        assert page._navigations[-1] == settings.cmp_dashboard_url
-
-    def test_new_otp_timestamp_on_every_relogin(self):
-        """Each re-login must read a fresh timestamp from the clock."""
-        settings = make_test_settings()
-        page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
-
-        from dashboard_monitor import ContinuousMonitor
-        otp_provider = FakeOtpProvider()
-        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider)
-
-        monitor.monitor_once()
-        first = otp_provider.poll_calls[0]
-        assert first.tzinfo is not None
-
-        # Simulate another session expiry
-        page.set_session_expired()
-        monitor.monitor_once()
-
-        second = otp_provider.poll_calls[1]
-        assert first != second
+    def test_foreign_host_never_verified_even_with_dom(self):
+        from dashboard_monitor import _is_verified_dashboard
+        page = FakePage("https://evil.example.com/#!dashboard")
+        page.set_dashboard_ready(True)
+        assert not _is_verified_dashboard(page)
 
 
 class TestProductsRedirectBackToDashboard:
+    def test_products_to_dashboard(self):
+        settings = make_test_settings()
+        page = FakePage(url="https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(
+            settings=settings,
+            page=page,
+            otp_provider=otp_provider,
+            clock=FakeClock(),
+        )
+
+        result = monitor.monitor_once()
+        assert result is False
+        assert page.url == settings.cmp_dashboard_url
+        # The dashboard is reached by clicking the real menu item, never by a
+        # direct goto to the dashboard URL.
+        assert page.goto_calls == []
+        assert page.menu_clicks >= 1
+
     def test_navigating_to_dashboard_after_reload(self):
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
 
         from dashboard_monitor import ContinuousMonitor
         otp_provider = FakeOtpProvider()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
         monitor.monitor_once()
 
-        assert len(page._navigations) > 0
-        assert settings.cmp_dashboard_url in page._navigations
+        assert page.url == settings.cmp_dashboard_url
+        assert not any("!dashboard" in url for url, _, _ in page.goto_calls)
+        assert page.menu_clicks >= 1
 
     def test_products_after_reload_navigates_back_without_relogin(self):
         """Reload redirecting to products is a normal redirect: back to dashboard, no OTP."""
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
 
         def reload_to_products():
             page._url = "https://ep.iotcc.telkomsel.com/#!products"
@@ -387,6 +619,51 @@ class TestProductsRedirectBackToDashboard:
         assert result is False
         assert page.url == settings.cmp_dashboard_url
         assert otp_provider.poll_calls == []
+        assert not any("!dashboard" in url for url, _, _ in page.goto_calls)
+        assert page.menu_clicks >= 1
+
+
+class TestSessionExpiryTriggeringReLogin:
+    def test_auth_expired_triggers_relogin(self):
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
+        page.set_menu_visible(True)
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
+        result = monitor.monitor_once()
+
+        # Should return True to indicate re-auth performed
+        assert result is True
+        # Should have requested exactly one OTP (no double polling)
+        assert len(otp_provider.poll_calls) == 1
+        # Should have navigated to dashboard after relogin
+        assert page.url == settings.cmp_dashboard_url
+        # Re-login ends on products, then the real Dashboard menu is clicked
+        assert page.menu_clicks >= 1
+        assert not any("!dashboard" in url for url, _, _ in page.goto_calls)
+
+    def test_new_otp_timestamp_on_every_relogin(self):
+        """Each re-login must read a fresh timestamp from the clock."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
+        page.set_menu_visible(True)
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
+
+        monitor.monitor_once()
+        first = otp_provider.poll_calls[0]
+        assert first.tzinfo is not None
+
+        # Simulate another session expiry
+        page.set_session_expired()
+        monitor.monitor_once()
+
+        second = otp_provider.poll_calls[1]
+        assert first != second
 
 
 class TestBoundedRetries:
@@ -407,12 +684,11 @@ class TestBoundedRetries:
     def test_recovery_backoff_sleep(self):
         settings = make_test_settings(recovery_retry_limit=2, recovery_backoff_seconds=10)
         page = FakePage("https://unknown.com")
+        page.set_menu_visible(True)
         from dashboard_monitor import ContinuousMonitor
         otp_provider = FakeOtpProvider()
         clock = FakeClock()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=clock)
-
-        from dashboard_monitor import RecoveryExhaustedError
 
         # First attempt: backoff sleep happens, recovery succeeds
         result = monitor.monitor_once()
@@ -431,6 +707,7 @@ class TestUnknownUrlHandling:
     def test_unknown_url_triggers_recovery(self):
         settings = make_test_settings()
         page = FakePage("https://unknown.com")
+        page.set_menu_visible(True)
 
         from dashboard_monitor import ContinuousMonitor
         otp_provider = FakeOtpProvider()
@@ -449,6 +726,7 @@ class TestUnknownUrlHandling:
     def test_unknown_state_after_reload(self):
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
 
         # Reload goes to unknown state
         def reload_to_unknown():
@@ -460,7 +738,8 @@ class TestUnknownUrlHandling:
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
         result = monitor.monitor_once()
 
-        # Should recover and return True
+        # Post-reload unknown state is handled in the same cycle via bounded
+        # recovery (which returns True on success).
         assert result is True
         assert monitor._consecutive_recoveries == 0
         assert page.url == settings.cmp_dashboard_url
@@ -468,6 +747,7 @@ class TestUnknownUrlHandling:
     def test_successful_unknown_state_recovery(self):
         settings = make_test_settings()
         page = FakePage("https://unknown.com")
+        page.set_menu_visible(True)
 
         from dashboard_monitor import ContinuousMonitor
         otp_provider = FakeOtpProvider()
@@ -525,7 +805,7 @@ class TestUnknownUrlHandling:
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
         # Should raise because recovery didn't reach dashboard
-        with pytest.raises(RecoveryError, match="unexpected state"):
+        with pytest.raises(RecoveryError, match="could not verify dashboard"):
             monitor.monitor_once()
         # Counter should NOT be reset
         assert monitor._consecutive_recoveries == 1
@@ -545,7 +825,7 @@ class TestUnknownUrlHandling:
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
         # First attempt: recovery fails, counter=1
-        with pytest.raises(RecoveryError, match="unexpected state"):
+        with pytest.raises(RecoveryError, match="could not verify dashboard"):
             monitor.monitor_once()
         assert monitor._consecutive_recoveries == 1
 
@@ -559,6 +839,7 @@ class TestRecoveryCounterReset:
     def test_counter_reset_after_successful_recovery(self):
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
+        page.set_menu_visible(True)
 
         from dashboard_monitor import ContinuousMonitor
         otp_provider = FakeOtpProvider()
@@ -587,9 +868,10 @@ class TestDashboardReloadRecovery:
     """Tests for dashboard reload followed by unknown state recovery."""
 
     def test_dashboard_reload_to_unknown_successful_recovery(self):
-        """Dashboard reload -> unknown -> successful bounded recovery."""
+        """Dashboard reload -> unknown -> bounded recovery back to dashboard."""
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
 
         # Reload goes to unknown state
         def reload_to_unknown():
@@ -602,11 +884,12 @@ class TestDashboardReloadRecovery:
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=clock)
         result = monitor.monitor_once()
 
-        # Should recover and return True
+        # Post-reload unknown is handled in the same cycle via bounded recovery
+        # (no re-authentication).
         assert result is True
         assert monitor._consecutive_recoveries == 0
         assert page.url == settings.cmp_dashboard_url
-        # Should have slept for backoff
+        # Backoff sleep happened before the recovery navigation
         assert settings.recovery_backoff_seconds in clock.sleep_calls
         # Should NOT have requested OTP (recovery, not relogin)
         assert len(otp_provider.poll_calls) == 0
@@ -657,7 +940,7 @@ class TestDashboardReloadRecovery:
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
         # First attempt: recovery fails, counter=1
-        with pytest.raises(RecoveryError, match="unexpected state"):
+        with pytest.raises(RecoveryError, match="could not verify dashboard"):
             monitor.monitor_once()
         assert monitor._consecutive_recoveries == 1
         assert len(otp_provider.poll_calls) == 0
@@ -672,6 +955,7 @@ class TestDashboardReloadRecovery:
         """Products redirect should not request a new OTP."""
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
 
         # Reload goes to products
         def reload_to_products():
@@ -692,6 +976,7 @@ class TestDashboardReloadRecovery:
         """CAS login state should request a new OTP."""
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
+        page.set_menu_visible(True)
 
         from dashboard_monitor import ContinuousMonitor
         otp_provider = FakeOtpProvider()
@@ -706,17 +991,20 @@ class TestDashboardReloadRecovery:
         """Unknown foreign-host lookalikes should trigger recovery, not direct auth."""
         settings = make_test_settings()
         page = FakePage("https://evil.example.com/#!dashboard")
+        page.set_menu_visible(True)
 
-        from dashboard_monitor import ContinuousMonitor, RecoveryError
+        from dashboard_monitor import ContinuousMonitor
         otp_provider = FakeOtpProvider()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
-        # It must recover through the approved dashboard URL, not authenticate
-        # directly from a foreign-host lookalike.
+        # It must recover through the products URL (SPA shell) and then the
+        # Dashboard menu click - never authenticate directly and never goto
+        # the dashboard URL directly.
         assert monitor.monitor_once() is True
         assert page.url == settings.cmp_dashboard_url
         assert monitor._consecutive_recoveries == 0
         assert len(otp_provider.poll_calls) == 0
+        assert not any("!dashboard" in url for url, _, _ in page.goto_calls)
 
 
 class TestNoBrowserDuringImport:
@@ -742,14 +1030,12 @@ class TestNavigationFailureRecovery:
         clock = FakeClock()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=clock)
 
+        # The page is still on a constructor-ready dashboard, so recovery
+        # verifies it without any navigation.
         assert monitor.monitor_once() is True
         assert monitor._consecutive_recoveries == 0
         assert settings.recovery_backoff_seconds in clock.sleep_calls
-        assert page.goto_calls[-1] == (
-            settings.cmp_dashboard_url,
-            settings.navigation_timeout_ms,
-            "domcontentloaded",
-        )
+        assert page.goto_calls == []
 
 
 class TestDashboardMenuNavigation:
@@ -767,22 +1053,21 @@ class TestDashboardMenuNavigation:
         assert result is True
         assert page.url == settings.cmp_dashboard_url
         assert page.goto_calls == []
+        assert page.menu_clicks >= 1
 
-    def test_navigate_to_dashboard_fallback_goto(self):
-        """When the SPA menu is not visible, fall back to a direct navigation."""
-        from dashboard_monitor import navigate_to_dashboard
+    def test_navigate_to_dashboard_menu_never_visible_raises(self):
+        """If the menu never renders, navigation must fail instead of goto dashboard."""
+        from dashboard_monitor import navigate_to_dashboard, RecoveryError
 
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
-        # Menu not visible (default) so it falls back to goto.
+        # Menu never becomes visible -> polling times out.
 
-        result = navigate_to_dashboard(page, settings, FakeClock())
-        assert result is True
-        assert page.goto_calls[-1] == (
-            settings.cmp_dashboard_url,
-            settings.navigation_timeout_ms,
-            "domcontentloaded",
-        )
+        with pytest.raises(RecoveryError):
+            navigate_to_dashboard(page, settings, FakeClock())
+        # Never a direct navigation to the dashboard URL.
+        assert not any("!dashboard" in url for url, _, _ in page.goto_calls)
+        assert page.menu_clicks == 0
 
     def test_monitor_once_products_menu_click_no_new_otp(self):
         """Products redirect uses the menu click to return to dashboard without a new OTP."""
@@ -801,9 +1086,10 @@ class TestDashboardMenuNavigation:
         assert page.url == settings.cmp_dashboard_url
         assert len(otp_provider.poll_calls) == 0
         assert page.goto_calls == []
+        assert page.menu_clicks >= 1
 
     def test_recovery_uses_menu_click_when_visible(self):
-        """Unknown-state recovery uses the menu click when the menu is visible."""
+        """Unknown-state recovery stages through products and uses the menu click."""
         settings = make_test_settings()
         page = FakePage("https://unknown.com")
         page.set_menu_visible(True)
@@ -816,16 +1102,468 @@ class TestDashboardMenuNavigation:
 
         assert monitor.monitor_once() is True
         assert page.url == settings.cmp_dashboard_url
-        assert page.goto_calls == []
+        # Recovery goes to the products URL (to load the SPA shell), then the
+        # real Dashboard menu item - never directly to the dashboard URL.
+        assert page.goto_calls == [
+            (settings.cmp_products_url, settings.navigation_timeout_ms, "domcontentloaded")
+        ]
+        assert page.menu_clicks >= 1
         assert len(otp_provider.poll_calls) == 0
 
-    def test_menu_click_failure_falls_back_to_goto(self):
-        """If the menu is not visible, navigation falls back to a direct goto."""
+    def test_menu_click_failure_raises_recovery_error(self):
+        """If the menu is not visible, navigation raises RecoveryError (no goto fallback)."""
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
-        # Menu not visible -> the menu branch returns False and goto is used.
+
+        from dashboard_monitor import navigate_to_dashboard, RecoveryError
+        with pytest.raises(RecoveryError):
+            navigate_to_dashboard(page, settings, FakeClock())
+        assert page.goto_calls == []
+        assert page.url == settings.cmp_products_url
+
+    def test_reload_to_products_navigates_immediately_via_menu_click(self):
+        """Post-reload reset to products navigates back to dashboard immediately
+        via the SPA menu click within the same monitor cycle."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
+
+        def reload_to_products():
+            page._url = "https://ep.iotcc.telkomsel.com/#!products"
+        page.reload = reload_to_products
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        clock = FakeClock()
+        monitor = ContinuousMonitor(
+            settings=settings, page=page, otp_provider=otp_provider, clock=clock
+        )
+
+        result = monitor.monitor_once()
+        # No re-authentication: immediate navigation back to dashboard.
+        assert result is False
+        assert page.url == settings.cmp_dashboard_url
+        assert page.goto_calls == []  # menu click used, no direct goto
+        assert page.menu_clicks >= 1
+        assert len(otp_provider.poll_calls) == 0
+
+
+class TestDashboardVerification:
+    """Regression tests for the false-positive dashboard detection fix."""
+
+    def test_hidden_menu_is_waited_for_not_goto(self):
+        """A not-yet-rendered Dashboard menu is waited for, never bypassed."""
+        from dashboard_monitor import navigate_to_dashboard
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible_after_reads(3)  # menu renders after 3 polls
+
+        result = navigate_to_dashboard(page, settings, FakeClock())
+        assert result is True
+        assert page.url == settings.cmp_dashboard_url
+        assert page.menu_clicks >= 1
+        assert page.goto_calls == []
+
+    def test_delayed_menu_becomes_visible_and_clicked(self):
+        """A delayed Dashboard menu becomes visible and is clicked."""
+        from dashboard_monitor import navigate_to_dashboard
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible_after_reads(2)
+
+        result = navigate_to_dashboard(page, settings, FakeClock())
+        assert result is True
+        assert page.menu_clicks == 1
+        assert page.url == settings.cmp_dashboard_url
+
+    def test_no_production_path_calls_goto_dashboard_url(self):
+        """No production path may navigate directly to the dashboard URL."""
+        import inspect
+        import dashboard_monitor
+
+        src = inspect.getsource(dashboard_monitor)
+        assert "goto(settings.cmp_dashboard_url" not in src
+        assert "goto(self._settings.cmp_dashboard_url" not in src
+
+        # Behavioral check: recovery from unknown never goto's the dashboard URL.
+        settings = make_test_settings()
+        page = FakePage("https://unknown.com")
+        page.set_menu_visible(True)
+
+        from dashboard_monitor import ContinuousMonitor
+        monitor = ContinuousMonitor(
+            settings=settings, page=page, otp_provider=FakeOtpProvider(), clock=FakeClock()
+        )
+        assert monitor.monitor_once() is True
+        assert page.url == settings.cmp_dashboard_url
+        assert all("!dashboard" not in url for url, _, _ in page.goto_calls)
+
+    def test_temporary_dashboard_url_that_resets_is_not_successful(self):
+        """A stale #!dashboard URL that later resets to #!products is not success."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_dashboard_ready(False)  # URL reports dashboard but UI is not there
+        page.set_menu_visible(True)
+        page.set_post_reload("https://ep.iotcc.telkomsel.com/#!products", "products", after_reads=3)
+        page.reload()
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
+
+        result = monitor.monitor_once()
+        # The stale URL was not accepted: the monitor detected the products
+        # reset and re-navigated through the real menu click.
+        assert result is False
+        assert page.url == settings.cmp_dashboard_url
+        assert page.menu_clicks >= 1
+        assert len(otp_provider.poll_calls) == 0
+
+    def test_dashboard_success_requires_consecutive_verified_polls(self):
+        """A menu click that bounces back to products is retried, not reported as success."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+        page.set_menu_click_bounce(
+            "https://ep.iotcc.telkomsel.com/#!products", "products", after_reads=2, via_dashboard=True
+        )
 
         from dashboard_monitor import navigate_to_dashboard
-        assert navigate_to_dashboard(page, settings, FakeClock()) is True
-        assert page.goto_calls != []
+        result = navigate_to_dashboard(page, settings, FakeClock())
+        assert result is True
         assert page.url == settings.cmp_dashboard_url
+        # The first click bounced back to products, so exactly one retry (a
+        # second real click) was required - never more.
+        assert page.menu_clicks == 2
+
+    def test_post_click_unverified_diagnostics_are_emitted(self, caplog):
+        """Throttled DEBUG diagnostics are emitted while verification is pending.
+
+        Regression test for the live failure where the Dashboard menu was
+        clicked but verification timed out with NO diagnostics: the post-click
+        diagnostics must be emitted (safe facts only) while the route has not
+        yet confirmed the dashboard, plus one final diagnostic before timeout.
+        """
+        import logging
+
+        from dashboard_monitor import navigate_to_dashboard, RecoveryError
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+        # Model a real-world transition that takes far longer than the
+        # navigation timeout: the URL/hash/DOM stay on Products after the click.
+        page.set_click_transition_delay(100000)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(RecoveryError):
+                navigate_to_dashboard(page, settings, FakeClock())
+
+        assert "Dashboard unverified after click" in caplog.text
+        assert "Dashboard DOM diagnostics" in caplog.text
+        assert "Dashboard verification timed out" in caplog.text
+        # Safe facts only: no HTML dump, credentials, OTPs or full query URLs.
+        assert "state=PRODUCTS" in caplog.text
+        assert "password" not in caplog.text.lower()
+        assert "secret" not in caplog.text.lower()
+
+    def test_products_reached_by_manual_url_change_detected_within_one_second(self):
+        """A manual URL change to products is detected at the next one-second poll."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
+        # The transition fires during the first one-second monitor poll
+        # (after_reads=2: one read by monitor_once's classify, one by the poll).
+        page.schedule_transition(
+            "https://ep.iotcc.telkomsel.com/#!products", "products", after_reads=2
+        )
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        clock = FakeClock()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=clock)
+
+        result = monitor.monitor_once()
+        assert result is False
+        assert page.url == settings.cmp_dashboard_url
+        assert len(otp_provider.poll_calls) == 0
+        # 1 wait poll + 2 consecutive verification polls
+        assert clock.sleep_calls.count(1.0) == 3
+
+    def test_session_closed_triggers_relogin_immediately(self):
+        """/session-closed while monitoring triggers an immediate fresh relogin."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
+        page.schedule_transition(
+            "https://ep.iotcc.telkomsel.com/session-closed?locale=en", "cas", after_reads=1
+        )
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        clock = FakeClock()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=clock)
+
+        result = monitor.monitor_once()
+        assert result is True
+        assert len(otp_provider.poll_calls) == 1
+        assert page.url == settings.cmp_dashboard_url
+        assert page.menu_clicks >= 1
+
+    def test_menu_wait_detects_session_expiry_triggers_relogin(self):
+        """If the page hits CAS/session-closed while waiting for the menu, re-login."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+        page.schedule_transition(
+            "https://ep.iotcc.telkomsel.com/session-closed?locale=en", "cas", after_reads=1
+        )
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
+
+        result = monitor.monitor_once()
+        assert result is True
+        assert len(otp_provider.poll_calls) == 1
+        assert page.url == settings.cmp_dashboard_url
+
+    def test_relogin_ends_with_products_then_menu_click(self):
+        """Re-login completes on products; the dashboard is reached by menu click."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
+        page.set_menu_visible(True)
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
+
+        result = monitor.monitor_once()
+        assert result is True
+        assert page.menu_clicks >= 1
+        assert not any("!dashboard" in url for url, _, _ in page.goto_calls)
+        assert page.url == settings.cmp_dashboard_url
+
+    def test_post_reload_delayed_dashboard_to_products_detected_same_cycle(self):
+        """Post-reload DASHBOARD -> PRODUCTS delayed transition is handled in the same cycle."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
+        page.set_post_reload(
+            "https://ep.iotcc.telkomsel.com/#!products", "products", after_reads=2
+        )
+        page.reload()
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
+
+        result = monitor.monitor_once()
+        assert result is False
+        assert page.url == settings.cmp_dashboard_url
+        assert page.menu_clicks >= 1
+        assert len(otp_provider.poll_calls) == 0
+
+
+class TestSteadyStateVerification:
+    """Review findings: verified-UI steady-state checks and click discipline."""
+
+    def test_dashboard_url_with_unverified_ui_detected_within_one_second(self):
+        """A #!dashboard URL whose UI is unverified is detected within one second."""
+        settings = make_test_settings(refresh_interval_seconds=60)
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_dashboard_ready(False)  # URL says dashboard, DOM does not confirm
+        page.set_menu_visible(True)
+        clock = FakeClock()
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(
+            settings=settings, page=page, otp_provider=otp_provider, clock=clock
+        )
+
+        result = monitor.monitor_once()
+        assert result is False
+        assert page.url == settings.cmp_dashboard_url
+        assert page.menu_clicks >= 1
+        assert len(otp_provider.poll_calls) == 0
+        # Recovery happened well before the refresh deadline: the monitor did
+        # NOT wait the full refresh interval before acting on the mismatch.
+        assert len(clock.sleep_calls) < settings.refresh_interval_seconds
+
+    def test_two_consecutive_failed_verifications_trigger_recovery(self):
+        """Exactly two consecutive unverified polls trigger recovery."""
+        settings = make_test_settings(refresh_interval_seconds=60)
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_dashboard_ready(False)  # never verified
+        page.set_menu_visible(True)
+        clock = FakeClock()
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(
+            settings=settings, page=page, otp_provider=otp_provider, clock=clock
+        )
+
+        result = monitor.monitor_once()
+        assert result is False
+        assert page.url == settings.cmp_dashboard_url
+        assert page.menu_clicks == 1
+        assert len(otp_provider.poll_calls) == 0
+        # 2 monitor polls (1s each) confirmed the inconsistency, then the
+        # inconsistent-dashboard observer ran for its bounded period (2 polls),
+        # then 2 verification polls confirmed the recovered dashboard.
+        assert clock.sleep_calls.count(1.0) == 6
+
+    def test_slow_menu_click_transition_causes_only_one_click(self):
+        """A slow menu-click transition (delayed render) causes only one click."""
+        from dashboard_monitor import navigate_to_dashboard
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+        page.set_click_delay_reads(3)  # dashboard view renders only after 3 reads
+
+        result = navigate_to_dashboard(page, settings, FakeClock())
+        assert result is True
+        assert page.url == settings.cmp_dashboard_url
+        # Exactly one click: the slow transition is waited for, not re-clicked.
+        assert page.menu_clicks == 1
+
+    def test_delayed_menu_click_transition_produces_exactly_one_click(self):
+        """A click whose URL/hash AND DOM transition are delayed causes one click.
+
+        Models the real-world Vaadin transition where clicking Dashboard does
+        not change either the URL or the DOM immediately: both stay on products
+        for several polls, then transition together to the dashboard. The
+        in-flight click must NOT be repeated every second while the first
+        navigation is still loading.
+        """
+        from dashboard_monitor import navigate_to_dashboard
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+        # URL/hash AND dashboard DOM change only after 4 url reads (a slow
+        # real-world Vaadin transition).
+        page.set_click_transition_delay(4)
+
+        result = navigate_to_dashboard(page, settings, FakeClock())
+        assert result is True
+        assert page.url == settings.cmp_dashboard_url
+        # Exactly one click: the delayed transition is waited for, never
+        # re-clicked merely because the Products URL is still unchanged.
+        assert page.menu_clicks == 1
+
+    def test_35_second_delayed_transition_produces_exactly_one_click(self):
+        """A click whose URL/hash AND DOM transition are delayed for >=35 seconds causes one click.
+
+        Models a slow real-world Vaadin transition where clicking Dashboard
+        does not change either the URL or the DOM for at least 35 simulated
+        seconds after the click. The transition to dashboard happens only
+        after this delay. The in-flight click must NOT be repeated every
+        second while the first navigation is still loading.
+
+        This test uses a clock where time advances through sleep() calls,
+        ensuring the simulated 35+ second delay is realistic.
+        """
+        from dashboard_monitor import navigate_to_dashboard
+
+        settings = make_test_settings(navigation_timeout_ms=120000)
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+        # 35 seconds = 35 iterations at 1s sleep each = 70 URL reads
+        # (2 reads per iteration: classify_state + _is_verified_dashboard)
+        page.set_click_transition_delay(70)
+
+        # Use a clock that advances time through sleep() calls
+        class FakeClockAdvancingSleep(FakeClock):
+            def sleep(self, seconds):
+                super().sleep(seconds)
+                self._t += seconds
+
+        result = navigate_to_dashboard(page, settings, FakeClockAdvancingSleep())
+        assert result is True
+        assert page.url == settings.cmp_dashboard_url
+        # Exactly one click: the delayed transition is waited for, never
+        # re-clicked merely because the Products URL is still unchanged.
+        assert page.menu_clicks == 1
+
+    def test_confirmed_bounce_permits_exactly_one_retry(self):
+        """A confirmed bounce (left Products, then returned) permits one retry.
+
+        The page first left Products (the click was consumed) and later came
+        back to Products: the router undid the navigation. This round-trip is
+        the positive evidence required for a single re-click - never more.
+        """
+        from dashboard_monitor import navigate_to_dashboard
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+        page.set_menu_click_bounce(
+            "https://ep.iotcc.telkomsel.com/#!products", "products", after_reads=2, via_dashboard=True
+        )
+
+        result = navigate_to_dashboard(page, settings, FakeClock())
+        assert result is True
+        assert page.url == settings.cmp_dashboard_url
+        # First click bounced back to products, so exactly one retry (a second
+        # real click) was required - never more.
+        assert page.menu_clicks == 2
+
+    def test_transient_unknown_after_reload_no_immediate_recovery(self):
+        """A transient UNKNOWN right after reload does not trigger immediate recovery."""
+        settings = make_test_settings(refresh_interval_seconds=60)
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
+
+        # Reload lands on an unknown URL for one poll, then settles on products.
+        def reload_transient_unknown():
+            page._url = "https://unknown.com"
+            page.schedule_transition(
+                "https://ep.iotcc.telkomsel.com/#!products", "products", after_reads=2
+            )
+        page.reload = reload_transient_unknown
+
+        clock = FakeClock()
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(
+            settings=settings, page=page, otp_provider=otp_provider, clock=clock
+        )
+
+        result = monitor.monitor_once()
+        # The transient UNKNOWN was confirmed before recovering: the page
+        # settled on products and was navigated back via the real menu click,
+        # with NO bounded recovery and NO new OTP.
+        assert result is False
+        assert page.url == settings.cmp_dashboard_url
+        assert monitor._consecutive_recoveries == 0
+        assert len(otp_provider.poll_calls) == 0
+        assert settings.recovery_backoff_seconds not in clock.sleep_calls
+        assert page.goto_calls == []
+
+    def test_stable_unknown_after_reload_triggers_bounded_recovery(self):
+        """A stable UNKNOWN after reload does trigger bounded recovery."""
+        settings = make_test_settings(refresh_interval_seconds=60)
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
+
+        def reload_stable_unknown():
+            page._url = "https://unknown.com"
+        page.reload = reload_stable_unknown
+
+        clock = FakeClock()
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(
+            settings=settings, page=page, otp_provider=otp_provider, clock=clock
+        )
+
+        result = monitor.monitor_once()
+        assert result is True
+        assert page.url == settings.cmp_dashboard_url
+        assert monitor._consecutive_recoveries == 0  # reset after verified dashboard
+        assert settings.recovery_backoff_seconds in clock.sleep_calls
+        assert len(otp_provider.poll_calls) == 0

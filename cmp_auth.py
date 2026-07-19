@@ -108,7 +108,7 @@ def _do_authenticate(
         # Submit username/password form
         current_step = "submitting initial credentials form"
         page.wait_for_selector("#fm1 input[name='submit']", state="visible", timeout=settings.navigation_timeout_ms)
-        page.click("#fm1 input[name='submit'][type='submit']")
+        page.click("#fm1 input[name='submit'][type='submit']", timeout=settings.navigation_timeout_ms)
         log.info("Initial form submitted")
 
         # Wait for OTP form to appear
@@ -125,7 +125,7 @@ def _do_authenticate(
         # Submit OTP
         current_step = "submitting OTP form"
         page.fill("#token", otp_value)
-        page.click("#login input[name='_eventId_submit'][type='submit']")
+        page.click("#login input[name='_eventId_submit'][type='submit']", timeout=settings.navigation_timeout_ms)
         log.info("OTP submitted")
 
         # Wait for successful navigation to products page

@@ -69,7 +69,7 @@ class FakePage:
     def fill(self, selector: str, value: str):
         self.fills[selector] = value
 
-    def click(self, selector: str):
+    def click(self, selector: str, timeout: int | float | None = None):
         self.clicks.append(selector)
         # Initial credential form submit: #fm1 input[name='submit'][type='submit']
         if selector == "#fm1 input[name='submit'][type='submit']":

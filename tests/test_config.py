@@ -182,6 +182,55 @@ class TestEnvFileLoading:
         assert len(settings.imap_username.get_secret_value()) > 0
         assert len(settings.imap_password.get_secret_value()) > 0
 
+    def _minimal_env_content(self) -> str:
+        return (
+            "CMP_CAS_URL=https://ep.iotcc.telkomsel.com/cas/login\n"
+            "CMP_PRODUCTS_URL=https://ep.iotcc.telkomsel.com/#!products\n"
+            "CMP_DASHBOARD_URL=https://ep.iotcc.telkomsel.com/#!dashboard\n"
+            "CMP_USERNAME=testuser\n"
+            "CMP_PASSWORD=testpass\n"
+            "IMAP_USERNAME=imapuser\n"
+            "IMAP_PASSWORD=imappass\n"
+        )
+
+    def test_process_env_overrides_dotenv(self, tmp_path, monkeypatch):
+        """Process environment variables must override .env values."""
+        dot_env = tmp_path / ".env"
+        dot_env.write_text(self._minimal_env_content() + "LOG_LEVEL=INFO\n")
+
+        # Ensure no stale LOG_LEVEL in the process environment.
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+        settings = load_settings(env_file=dot_env)
+        assert settings.log_level == "INFO"
+
+        # Now set LOG_LEVEL=DEBUG in the process environment: it must win.
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        settings = load_settings(env_file=dot_env)
+        assert settings.log_level == "DEBUG"
+
+    def test_explicit_env_mapping_highest_precedence(self, tmp_path, monkeypatch):
+        """Explicit env mapping overrides both .env and process environment."""
+        dot_env = tmp_path / ".env"
+        dot_env.write_text(self._minimal_env_content() + "LOG_LEVEL=INFO\n")
+
+        monkeypatch.setenv("LOG_LEVEL", "WARNING")
+        settings = load_settings(env_file=dot_env, env={"LOG_LEVEL": "DEBUG"})
+        assert settings.log_level == "DEBUG"
+
+    def test_auto_dotenv_precedence_no_env_override(self, tmp_path, monkeypatch):
+        """Automatic .env discovery keeps defaults when nothing overrides them."""
+        dot_env = tmp_path / ".env"
+        dot_env.write_text(self._minimal_env_content() + "LOG_LEVEL=INFO\n")
+
+        original_cwd = Path.cwd()
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+        os.chdir(tmp_path)
+        try:
+            settings = load_settings()
+            assert settings.log_level == "INFO"
+        finally:
+            os.chdir(original_cwd)
+
 
 class TestTimezoneValidation:
     """Tests for timezone validation."""

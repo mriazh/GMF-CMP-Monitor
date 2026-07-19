@@ -81,7 +81,13 @@ def _environment(
     env: Mapping[str, str] | None = None,
     env_file: str | Path | None = None,
 ) -> dict[str, str]:
-    """Load environment variables from .env file and/or provided mapping."""
+    """Load environment variables from .env file and/or provided mapping.
+
+    Precedence (lowest to highest): defaults applied by load_settings, values
+    from the .env file, process environment variables, and finally the explicit
+    env mapping. Process environment variables therefore override .env values,
+    and an explicit env mapping overrides both.
+    """
     if not env_file:
         # Check current directory then project root for .env
         for candidate in [Path(".env"), PROJECT_ROOT / ".env"]:
@@ -89,7 +95,7 @@ def _environment(
                 env_file = candidate
                 break
 
-    values = dict(os.environ)
+    values: dict[str, str] = {}
     if env_file:
         path = Path(env_file)
         if path.exists():
@@ -100,6 +106,10 @@ def _environment(
                 if "=" in line:
                     k, v = line.split("=", 1)
                     values[k.strip()] = v.strip()
+    # Process environment variables override .env values.
+    for key, value in os.environ.items():
+        values[key] = value
+    # Explicit env mapping has the highest precedence.
     if env:
         values.update(env)
     return values
