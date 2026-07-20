@@ -118,6 +118,8 @@ class TestFirefoxOnly:
 
                         # Verify Firefox was launched
                         mock_playwright.firefox.launch.assert_called_once()
+                        # Verify browser context was created with 1920x1080 viewport
+                        mock_browser.new_context.assert_called_once_with(viewport={"width": 1920, "height": 1080})
                         # Verify Chromium/Chrome/WebKit were NOT called
                         assert not mock_playwright.chromium.launch.called
                         assert not mock_playwright.webkit.launch.called

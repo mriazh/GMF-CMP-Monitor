@@ -25,7 +25,7 @@ def test_live_login_to_dashboard():
     try:
         with sync_playwright() as playwright:
             browser = playwright.firefox.launch(headless=settings.headless)
-            context = browser.new_context()
+            context = browser.new_context(viewport={"width": 1920, "height": 1080})
             page = context.new_page()
 
             # Run full authentication

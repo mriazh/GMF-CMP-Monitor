@@ -58,9 +58,9 @@ def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = Non
         # 3. Launch Firefox browser
         playwright = sync_playwright().start()
         browser = playwright.firefox.launch(headless=settings.headless)
-        context = browser.new_context()
+        context = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = context.new_page()
-        log.info("Firefox launched (headless=%s)", settings.headless)
+        log.info("Firefox launched (headless=%s, viewport=1920x1080)", settings.headless)
 
         # 4. Connect IMAP right before authentication to minimize idle time
         log.info("Connecting to IMAP...")
