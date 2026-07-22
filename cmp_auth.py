@@ -108,6 +108,7 @@ def _do_authenticate(
         # Submit username/password form
         current_step = "submitting initial credentials form"
         page.wait_for_selector("#fm1 input[name='submit']", state="visible", timeout=settings.navigation_timeout_ms)
+        _wait_for_initial_submit_enabled(page, settings)
         page.click("#fm1 input[name='submit'][type='submit']", timeout=settings.navigation_timeout_ms)
         log.info("Initial form submitted")
 
@@ -140,6 +141,70 @@ def _do_authenticate(
         if isinstance(exc, AuthenticationError):
             raise
         raise AuthenticationError("Authentication failed") from exc
+
+
+# Selectors for the initial CAS login form (verified against saved login page).
+INITIAL_SUBMIT_SELECTOR = "#fm1 input[name='submit'][type='submit']"
+INITIAL_SUBMIT_VISIBLE_SELECTOR = "#fm1 input[name='submit']"
+USERNAME_SELECTOR = "#username"
+PASSWORD_SELECTOR = "#password"
+
+
+def _wait_for_initial_submit_enabled(page: object, settings: Settings) -> None:
+    """Wait (bounded) for the initial login submit button to become enabled.
+
+    The CAS portal keeps the submit button disabled until its own client-side
+    validation is satisfied. We never force-click or bypass the disabled state:
+    the smallest standard interaction that can trigger the portal's validation
+    is a blur/change keyboard event on the last filled field, so we send one
+    and then poll the real enabled state.
+    """
+    deadline = time.monotonic() + (settings.navigation_timeout_ms / 1000.0)
+    diagnostics_logged = False
+
+    # Trigger the portal's normal form validation once after filling fields.
+    # This is a standard keyboard interaction (Tab blur), not a submission and
+    # not a JavaScript/force bypass of the disabled state.
+    try:
+        page.press(PASSWORD_SELECTOR, "Tab")
+    except Exception:
+        pass
+
+    while True:
+        try:
+            if page.is_enabled(INITIAL_SUBMIT_SELECTOR):
+                return
+        except Exception:
+            pass
+        if not diagnostics_logged:
+            _log_initial_submit_diagnostics(page)
+            diagnostics_logged = True
+        if time.monotonic() >= deadline:
+            raise AuthenticationError("Initial login submit button remained disabled")
+        time.sleep(0.2)
+
+
+def _log_initial_submit_diagnostics(page: object) -> None:
+    """Log safe diagnostics about the disabled initial submit control.
+
+    Only non-secret facts are logged: disabled state, enabled state,
+    document ready state, field presence, and value lengths (never values).
+    """
+    try:
+        log.warning(
+            "Initial submit control not enabled: disabled=%s, enabled=%s, ready=%s, "
+            "username_present=%s, password_present=%s, username_len=%d, password_len=%d, form_present=%s",
+            page.get_attribute(INITIAL_SUBMIT_SELECTOR, "disabled"),
+            page.is_enabled(INITIAL_SUBMIT_SELECTOR),
+            page.evaluate("document.readyState"),
+            page.is_visible(USERNAME_SELECTOR),
+            page.is_visible(PASSWORD_SELECTOR),
+            len(page.input_value(USERNAME_SELECTOR)),
+            len(page.input_value(PASSWORD_SELECTOR)),
+            page.is_visible("#fm1"),
+        )
+    except Exception:
+        log.warning("Initial submit control not enabled; could not gather safe diagnostics")
 
 
 def _wait_for_products_page(page: object, settings: Settings, clock: Clock) -> None:

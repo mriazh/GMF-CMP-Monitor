@@ -55,6 +55,52 @@ class FakePage:
         self._state = "initial"  # initial -> cas -> otp_form -> root_portal -> products
         self._products_url = "https://ep.iotcc.telkomsel.com/#!products"  # Default products URL
         self._root_portal_url = "https://ep.iotcc.telkomsel.com/"  # Root portal URL
+        self._submit_enabled = True  # Initial submit button enabled state
+        self._blur_enables_submit = True  # Model portal validation re-evaluation on blur
+        self.press_calls = []
+        self.attribute_queries = []
+        self.is_enabled_calls = []
+        self.is_visible_calls = []
+        self.evaluate_calls = []
+
+    def set_submit_enabled(self, enabled: bool):
+        """Control whether the initial submit button is enabled (disabled modeling)."""
+        self._submit_enabled = enabled
+
+    def set_blur_enables_submit(self, enabled: bool):
+        """Model whether the portal's validation re-evaluation enables the button on blur."""
+        self._blur_enables_submit = enabled
+
+    def is_enabled(self, selector: str) -> bool:
+        self.is_enabled_calls.append(selector)
+        if selector == "#fm1 input[name='submit'][type='submit']":
+            return self._submit_enabled
+        return True
+
+    def is_visible(self, selector: str) -> bool:
+        self.is_visible_calls.append(selector)
+        if self._state == "cas":
+            return selector in ("#username", "#password", "#fm1", "#fm1 input[name='submit']", "#fm1 input[name='submit'][type='submit']")
+        return False
+
+    def get_attribute(self, selector: str, name: str) -> str | None:
+        self.attribute_queries.append((selector, name))
+        if selector == "#fm1 input[name='submit'][type='submit']" and name == "disabled":
+            return "disabled" if not self._submit_enabled else None
+        return None
+
+    def press(self, selector: str, key: str):
+        self.press_calls.append((selector, key))
+        # The portal re-evaluates validation on blur; model that a Tab blur on
+        # the last filled field enables the submit button.
+        if (
+            selector == "#password"
+            and key == "Tab"
+            and self._blur_enables_submit
+            and self.fills.get("#username")
+            and self.fills.get("#password")
+        ):
+            self._submit_enabled = True
 
     def goto(self, url: str, timeout: int = None, wait_until: str = None):
         self.urls.append((url, timeout))
@@ -73,7 +119,7 @@ class FakePage:
         self.clicks.append(selector)
         # Initial credential form submit: #fm1 input[name='submit'][type='submit']
         if selector == "#fm1 input[name='submit'][type='submit']":
-            if self._state == "cas":
+            if self._state == "cas" and self._submit_enabled:
                 # First submit: username/password -> OTP form
                 self._state = "otp_form"
         # OTP form submit: #login input[name='_eventId_submit'][type='submit']
@@ -109,6 +155,9 @@ class FakePage:
 
     def evaluate(self, script: str):
         """Simulate page.evaluate for fragment checking."""
+        self.evaluate_calls.append(script)
+        if "document.readyState" in script:
+            return "complete"
         if "window.location.hash" in script:
             if self._state == "products":
                 return "#!products"
@@ -302,6 +351,61 @@ class TestFreshTimestampOnEveryReLogin:
         assert timestamp.tzinfo is not None
         # Asia/Jakarta is UTC+7
         assert timestamp.utcoffset() is not None
+
+
+class TestDisabledInitialSubmit:
+    def test_disabled_submit_button_raises_bounded_error(self):
+        """A visible but disabled initial submit button must fail with AuthenticationError."""
+        settings = make_test_settings(navigation_timeout_ms=100)
+        page = FakePage()
+        page.set_submit_enabled(False)
+        page.set_blur_enables_submit(False)  # Portal validation never satisfies
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        with pytest.raises(AuthenticationError, match="remained disabled"):
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+        # The form event was attempted (smallest correct interaction: Tab blur),
+        # but no click of the initial submit was allowed.
+        assert page.press_calls == [("#password", "Tab")]
+        assert "#fm1 input[name='submit'][type='submit']" not in page.clicks
+
+    def test_submit_enabled_by_form_event_then_clicked(self):
+        """A disabled button that becomes enabled after a blur event is clicked normally."""
+        settings = make_test_settings()
+        page = FakePage()
+        page.set_submit_enabled(False)
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp
+        result = authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+        assert result is True
+        # The Tab blur event enabled the button; the normal click then ran.
+        assert page.press_calls == [("#password", "Tab")]
+        assert "#fm1 input[name='submit'][type='submit']" in page.clicks
+
+    def test_no_force_click_or_javascript_bypass(self):
+        """The flow must never force-click or submit via JavaScript."""
+        settings = make_test_settings()
+        page = FakePage()
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp
+        authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+        # Clicks are plain selector clicks (no force flag is even supported).
+        assert page.clicks == [
+            "#fm1 input[name='submit'][type='submit']",
+            "#login input[name='_eventId_submit'][type='submit']",
+        ]
+        # evaluate is used only for safe fragment checks and the
+        # document.readyState diagnostic - never to submit the form.
+        assert all(
+            "window.location" in script or "document.readyState" in script
+            for script in page.evaluate_calls
+        )
 
 
 class TestAuthenticationFailure:

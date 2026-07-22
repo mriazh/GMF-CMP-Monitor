@@ -177,6 +177,8 @@ class FakePage:
             }
 
     def evaluate(self, expression):
+        if "document.readyState" in expression:
+            return "complete"
         if "location.hash" in expression:
             if self._hash_override is not None:
                 return self._hash_override
@@ -205,6 +207,38 @@ class FakePage:
 
     def input_value(self, selector):
         return self.inputs.get(selector, "")
+
+    def press(self, selector, key):
+        # Model the CAS portal re-evaluating validation on blur: a Tab blur on
+        # the last filled field enables the initial submit button.
+        if selector == "#password" and key == "Tab":
+            if self.fills.get("#username") and self.fills.get("#password"):
+                self._submit_enabled = True
+
+    def is_enabled(self, selector):
+        if selector == "#fm1 input[name='submit'][type='submit']":
+            return getattr(self, "_submit_enabled", True)
+        return True
+
+    def is_visible(self, selector):
+        if self._state == "cas":
+            return selector in (
+                "#username",
+                "#password",
+                "#fm1",
+                "#fm1 input[name='submit']",
+                "#fm1 input[name='submit'][type='submit']",
+            )
+        return self._locator_visible.get(selector, False)
+
+    def get_attribute(self, selector, name):
+        if (
+            selector == "#fm1 input[name='submit'][type='submit']"
+            and name == "disabled"
+            and not getattr(self, "_submit_enabled", True)
+        ):
+            return "disabled"
+        return None
 
     def wait_for_selector(self, selector, timeout=None, state=None):
         if selector == "#username" and self._state == "cas":
