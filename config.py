@@ -195,7 +195,10 @@ def _artifact_dir(values: Mapping[str, str]) -> Path:
 
 def _validate_cmp_url(url: str, setting_name: str) -> str:
     """Validate a CMP URL: HTTPS only, approved host only, no embedded secrets."""
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        raise ConfigError(f"Invalid URL for {setting_name}") from exc
     if parsed.scheme != "https" or not parsed.netloc:
         raise ConfigError(f"{setting_name} must be an HTTPS URL")
     # Check for embedded credentials before the host check so that URLs such as
@@ -204,8 +207,13 @@ def _validate_cmp_url(url: str, setting_name: str) -> str:
         raise ConfigError(f"{setting_name} must not contain embedded credentials")
     if parsed.hostname != APPROVED_CMP_HOST:
         raise ConfigError(f"{setting_name} must be on host {APPROVED_CMP_HOST}")
-    if parsed.port is not None:
+    if ":" in parsed.netloc:
         raise ConfigError(f"{setting_name} must not specify a port")
+    try:
+        if parsed.port is not None:
+            raise ConfigError(f"{setting_name} must not specify a port")
+    except ValueError as exc:
+        raise ConfigError(f"{setting_name} must not specify a port") from exc
     return url
 
 

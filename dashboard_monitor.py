@@ -16,7 +16,7 @@ import logging
 import time
 from enum import Enum, auto
 from typing import Protocol
-from urllib.parse import urlparse
+from urllib.parse import urlparse, ParseResult
 
 from config import Settings, APPROVED_CMP_HOST
 from cmp_auth import authenticate_cmp, AuthenticationError
@@ -24,11 +24,13 @@ from imap_client import OtpProviderProtocol
 
 log = logging.getLogger(__name__)
 
-# SPA menu selectors verified against the Vaadin DOM during live sessions.
+# SPA menu selectors for the Vaadin 7 dashboard navigation.
 DASHBOARD_MENU_SELECTOR = "span.main-menu-item-caption"
 DASHBOARD_MENU_TEXT = "Dashboard"
-# Selected-menu item and view DOM signals verified against live Vaadin DOM.
-# Note: Vaadin places the .selected class on the parent div container,
+# Selected-menu item and view DOM signals. These selectors are marked
+# UNVERIFIED until confirmed against the real post-click DOM during a live
+# session (see _log_dashboard_dom_diagnostics for safe selector facts).
+# Note: Vaadin may place the .selected class on the parent div container,
 # not the child caption span.
 DASHBOARD_SELECTED_SELECTOR = "div.main-menu-item.selected"
 DASHBOARD_VIEW_SELECTOR = "div.dashboard-view"
@@ -40,6 +42,9 @@ VERIFIED_DASHBOARD_POLLS = 2
 # Bounded observation period (seconds) for a dashboard URL whose UI is not
 # verified before staging recovery through the products URL.
 INCONSISTENT_DASHBOARD_OBSERVE_SECONDS = 3.0
+# Bounded route-settling period (seconds) when AUTH_EXPIRED is detected
+# to allow false session-closed or temporary CAS redirects to return to Products.
+AUTH_SETTLE_SECONDS = 5.0
 
 
 class Clock(Protocol):
@@ -83,54 +88,87 @@ class AuthenticationRequiredError(RecoveryError):
     pass
 
 
+def _is_approved_origin(parsed: ParseResult) -> bool:
+    """True if parsed URL matches the approved HTTPS origin strictly.
+
+    Rejects non-HTTPS schemes, foreign hostnames, explicit ports (including empty port syntax host:),
+    and embedded credentials. Handles malformed ports safely.
+    """
+    try:
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == APPROVED_CMP_HOST
+            and parsed.netloc == APPROVED_CMP_HOST
+            and parsed.port is None
+            and parsed.username is None
+            and parsed.password is None
+        )
+    except Exception:
+        return False
+
+
+def _live_fragment(page: object, parsed: ParseResult) -> str:
+    """Return the SPA route fragment, preferring the live ``window.location.hash``.
+
+    Playwright Firefox's ``page.url`` can lag behind ``window.location.hash``
+    mutations during a Vaadin route transition: the browser frame URL may still
+    report ``#!products`` while the live hash has already changed to
+    ``#!dashboard`` and the dashboard view has rendered. The live hash is the
+    authoritative route signal for the SPA router; ``page.url`` remains
+    authoritative only for origin validation. Falls back to the parsed URL
+    fragment ONLY for test doubles or objects that genuinely do not provide
+    ``evaluate``. If ``evaluate`` is available, its result is authoritative:
+    empty string, malformed/non-string result, or evaluation exception all
+    produce a non-Dashboard fragment (empty string) rather than falling back
+    to the stale ``page.url``.
+    """
+    if hasattr(page, "evaluate"):
+        try:
+            hash_value = page.evaluate("window.location.hash")
+        except Exception:
+            return ""
+        if isinstance(hash_value, str) and hash_value.startswith("#"):
+            return hash_value[1:]
+        return ""
+    return parsed.fragment
+
+
 def classify_state(page: object) -> DashboardState:
-    """Classify current page state based on URL.
+    """Classify current page state based on URL and live SPA hash.
 
     Returns DashboardState enum based on URL parsing:
     - DASHBOARD: HTTPS, approved host, fragment #!dashboard
     - PRODUCTS: HTTPS, approved host, fragment #!products
-    - AUTH_EXPIRED: HTTPS, approved host, /session-closed or /cas/login with a
-      visible login/OTP form
-    - UNKNOWN: anything else (including foreign-host lookalikes)
+    - AUTH_EXPIRED: HTTPS, approved host, exact auth paths (/cas/login, /cas/login/, /session-closed, /session-closed/)
+    - UNKNOWN: anything else (including foreign-host lookalikes, HTTP, non-auth endpoints, non-default ports, embedded credentials, malformed ports)
+
+    The route fragment is read from the live ``window.location.hash`` when
+    available (authoritative for the Vaadin SPA router) and only falls back to
+    the ``page.url`` fragment otherwise, so a stale Firefox ``page.url`` cannot
+    misclassify a rendered dashboard as Products.
     """
-    url = getattr(page, "url", "")
-    if not url:
+    try:
+        url = getattr(page, "url", "")
+        if not url:
+            return DashboardState.UNKNOWN
+        parsed = urlparse(url)
+        if not _is_approved_origin(parsed):
+            return DashboardState.UNKNOWN
+
+        # Check auth paths BEFORE checking fragments, so misleading fragments on auth paths cannot be classified as DASHBOARD or PRODUCTS
+        if parsed.path in ("/cas/login", "/cas/login/", "/session-closed", "/session-closed/"):
+            return DashboardState.AUTH_EXPIRED
+
+        # Check fragment for dashboard/products (live hash preferred)
+        fragment = _live_fragment(page, parsed)
+        if fragment == "!dashboard":
+            return DashboardState.DASHBOARD
+        elif fragment == "!products":
+            return DashboardState.PRODUCTS
+
         return DashboardState.UNKNOWN
-
-    parsed = urlparse(url)
-
-    # Must be HTTPS
-    if parsed.scheme != "https":
+    except Exception:
         return DashboardState.UNKNOWN
-
-    # Must be on approved host
-    if parsed.hostname != APPROVED_CMP_HOST:
-        return DashboardState.UNKNOWN
-
-    # Check fragment for dashboard/products
-    if parsed.fragment == "!dashboard":
-        return DashboardState.DASHBOARD
-    elif parsed.fragment == "!products":
-        return DashboardState.PRODUCTS
-
-    # Session-closed endpoint on the approved host indicates an expired session
-    if parsed.path.startswith("/session-closed"):
-        return DashboardState.AUTH_EXPIRED
-
-    # Check for CAS/login paths on approved host
-    if parsed.path in ("/cas/login", "/cas/login/"):
-        # Check if login form is visible (#username and #password) OR OTP form is visible (#token)
-        try:
-            has_login_form = page.locator("#username").is_visible() and page.locator("#password").is_visible()
-            has_otp_form = page.locator("#token").is_visible()
-            if has_login_form or has_otp_form:
-                return DashboardState.AUTH_EXPIRED
-        except Exception:
-            pass
-        # CAS path but no recognized form
-        return DashboardState.UNKNOWN
-
-    return DashboardState.UNKNOWN
 
 
 def _dashboard_dom_ready(page: object) -> bool:
@@ -152,26 +190,22 @@ def _dashboard_dom_ready(page: object) -> bool:
 
 
 def _is_verified_dashboard(page: object) -> bool:
-    """True only when URL, window.location.hash and DOM all confirm dashboard.
+    """True only when approved origin, live SPA hash and DOM confirm dashboard.
 
-    This is the real dashboard verifier: it requires the approved HTTPS URL
-    with the ``!dashboard`` fragment, ``window.location.hash == "#!dashboard"``
-    and a dashboard-ready DOM signal.
+    This is the real dashboard verifier: it requires the approved HTTPS origin
+    (from ``page.url``), the live ``window.location.hash == "#!dashboard"``
+    (authoritative for the Vaadin SPA router; ``page.url`` can lag behind in
+    Firefox during route transitions) and a dashboard-ready DOM signal.
     """
     try:
         url = getattr(page, "url", "")
         if not url:
             return False
         parsed = urlparse(url)
-        if (
-            parsed.scheme != "https"
-            or parsed.hostname != APPROVED_CMP_HOST
-            or parsed.fragment != "!dashboard"
-        ):
+        if not _is_approved_origin(parsed):
             return False
-        if hasattr(page, "evaluate"):
-            if page.evaluate("window.location.hash") != "#!dashboard":
-                return False
+        if _live_fragment(page, parsed) != "!dashboard":
+            return False
         return _dashboard_dom_ready(page)
     except Exception:
         return False
@@ -262,6 +296,52 @@ def _visible_dashboard_menu(page: object) -> object | None:
         return None
 
 
+# Maximum allowed SPA bootstrap/load time before Dashboard menu polling begins.
+# The Vaadin 7 shell may take up to ~90s to fully load after domcontentloaded.
+VAADIN_BOOTSTRAP_TIMEOUT_SECONDS = 150.0
+
+
+def _is_playwright_page(page: object) -> bool:
+    """Check if the page is a real Playwright page (not a test double)."""
+    return hasattr(page, "context") and hasattr(page, "goto")
+
+
+def _wait_for_vaadin_loading(page: object, clock: Clock, timeout_seconds: float) -> None:
+    """Wait for the Vaadin SPA menu to become visible before navigation polling.
+
+    The Vaadin 7 shell loads asynchronously: the initial HTML (domcontentloaded)
+    renders only a loading shell, and the real menu items are created by the
+    widgetset JavaScript, which can take tens of seconds. This pre-wait polls for
+    the Dashboard menu so that the bounded click/verify deadline is not consumed
+    by the SPA bootstrap. Returns as soon as the menu is visible.
+
+    Skips the pre-wait for test doubles (FakePage) that lack Playwright's
+    ``context`` attribute, so unit tests are not slowed down.
+
+    Raises RecoveryError if the menu never becomes visible within the timeout.
+    """
+    # Test doubles (FakePage) do not have the Dashboard menu; skip immediately.
+    if not _is_playwright_page(page):
+        return
+    if _visible_dashboard_menu(page) is not None:
+        return
+    log.info(
+        "Waiting up to %.0fs for Vaadin SPA menu to load", timeout_seconds
+    )
+    deadline = clock.now() + timeout_seconds
+    while clock.now() < deadline:
+        if _visible_dashboard_menu(page) is not None:
+            log.info("Vaadin SPA menu became visible")
+            return
+        clock.sleep(POLL_INTERVAL_SECONDS)
+    log.error(
+        "Vaadin SPA menu never became visible after %.0fs", timeout_seconds
+    )
+    raise RecoveryError(
+        "Dashboard navigation failed: Vaadin SPA menu never became visible"
+    )
+
+
 def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> bool:
     """Wait for the Dashboard menu item, click it, and verify a stable dashboard.
 
@@ -277,6 +357,10 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
     Raises AuthenticationRequiredError if the page moves to CAS login or
     /session-closed while waiting. Raises RecoveryError on timeout.
     """
+    # Pre-wait: the Vaadin 7 SPA shell may take up to 90s to fully load and
+    # render the menu items. Poll for the menu to appear (or the v-app-loading
+    # indicator to disappear) before starting the main navigation deadline.
+    _wait_for_vaadin_loading(page, clock, VAADIN_BOOTSTRAP_TIMEOUT_SECONDS)
     deadline = clock.now() + (settings.navigation_timeout_ms / 1000.0)
     clicked = False
     left_products_seen = False
@@ -455,8 +539,8 @@ class ContinuousMonitor:
                 log.info("Redirected to products; navigating to dashboard")
                 return self._handle_products_state()
             if current_state == DashboardState.AUTH_EXPIRED:
-                log.info("Session expired; initiating re-authentication")
-                return self._relogin_and_navigate()
+                log.info("Session expired detected; checking route settle")
+                return self._handle_auth_expired()
 
             log.warning("Unknown state detected; initiating bounded recovery")
             return self._recover_to_dashboard()
@@ -476,8 +560,7 @@ class ContinuousMonitor:
             log.error("Monitoring error occurred: %s", type(exc).__name__)
             self._consecutive_recoveries += 1
             self._check_recovery_limit()
-            # Re-raise to avoid silently masking errors
-            raise
+            raise RecoveryError("Monitoring error occurred") from exc
 
     def _monitor_dashboard_state(self) -> bool:
         """Wait for the refresh interval while polling the state once per second.
@@ -515,8 +598,8 @@ class ContinuousMonitor:
                 log.info("Dashboard changed to PRODUCTS; navigating back to dashboard")
                 return self._handle_products_state()
             if state == DashboardState.AUTH_EXPIRED:
-                log.info("Session expired while waiting; re-authenticating")
-                return self._relogin_and_navigate()
+                log.info("Session expired while waiting; checking route settle")
+                return self._handle_auth_expired()
             log.warning("Dashboard changed to unknown state; bounded recovery")
             return self._recover_to_dashboard()
 
@@ -556,8 +639,8 @@ class ContinuousMonitor:
             self._clock.sleep(POLL_INTERVAL_SECONDS)
             state = classify_state(self._page)
             if state == DashboardState.AUTH_EXPIRED:
-                log.info("Session expired during dashboard verification; re-authenticating")
-                return self._relogin_and_navigate()
+                log.info("Session expired during dashboard verification; checking route settle")
+                return self._handle_auth_expired()
             if state == DashboardState.PRODUCTS:
                 log.info("Dashboard inconsistency resolved to products; menu-clicking dashboard")
                 return self._handle_products_state()
@@ -611,8 +694,8 @@ class ContinuousMonitor:
             log.info("Portal reset to PRODUCTS after refresh; navigating back to dashboard")
             return self._handle_products_state()
         if settled == DashboardState.AUTH_EXPIRED:
-            log.info("Session expired after refresh; re-authenticating")
-            return self._relogin_and_navigate()
+            log.info("Session expired after refresh; checking route settle")
+            return self._handle_auth_expired()
         if settled == DashboardState.DASHBOARD:
             log.info("Dashboard verified after refresh")
             self._consecutive_recoveries = 0
@@ -661,6 +744,45 @@ class ContinuousMonitor:
                 return DashboardState.UNKNOWN
             log.debug("Post-reload UNKNOWN (%d consecutive); confirming", unknown_polls)
         raise RecoveryError("Route did not settle after reload")
+
+    def _settle_auth_route(self) -> DashboardState:
+        """Poll the route for up to AUTH_SETTLE_SECONDS when AUTH_EXPIRED is detected.
+
+        If the page returns to PRODUCTS or a verified DASHBOARD (e.g. false
+        session-closed redirect or temporary CAS navigation), returns that state immediately.
+        Otherwise returns the final observed state (AUTH_EXPIRED or UNKNOWN) after deadline.
+        Unverified DASHBOARD observations are never returned as settled DASHBOARD state.
+        """
+        deadline = self._clock.now() + AUTH_SETTLE_SECONDS
+        last_state = DashboardState.AUTH_EXPIRED
+        while self._clock.now() < deadline:
+            self._clock.sleep(POLL_INTERVAL_SECONDS)
+            state = classify_state(self._page)
+            if state == DashboardState.PRODUCTS:
+                return DashboardState.PRODUCTS
+            if state == DashboardState.DASHBOARD:
+                if _is_verified_dashboard(self._page):
+                    return DashboardState.DASHBOARD
+                last_state = DashboardState.UNKNOWN
+            else:
+                last_state = state
+        return last_state
+
+    def _handle_auth_expired(self) -> bool:
+        """Handle AUTH_EXPIRED state with bounded route settling to prevent false relogins."""
+        settled_state = self._settle_auth_route()
+        if settled_state == DashboardState.PRODUCTS:
+            log.info("Auth expired route settled to PRODUCTS; navigating to dashboard")
+            return self._handle_products_state()
+        if settled_state == DashboardState.DASHBOARD:
+            log.info("Auth expired route settled to verified DASHBOARD")
+            self._consecutive_recoveries = 0
+            return False
+        if settled_state == DashboardState.AUTH_EXPIRED:
+            log.info("Session expired; initiating re-authentication")
+            return self._relogin_and_navigate()
+        log.warning("Auth expired route settled to %s; starting bounded recovery", settled_state)
+        return self._recover_to_dashboard()
 
     def _perform_relogin(self) -> None:
         """Perform full re-authentication flow.

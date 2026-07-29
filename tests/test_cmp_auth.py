@@ -51,6 +51,7 @@ class FakePage:
         self.current_url = "about:blank"
         self.inputs = {}
         self._otp_form_visible = False
+        self._locator_visible = {}
         self.default_timeout = 30000
         self._state = "initial"  # initial -> cas -> otp_form -> root_portal -> products
         self._products_url = "https://ep.iotcc.telkomsel.com/#!products"  # Default products URL
@@ -79,6 +80,10 @@ class FakePage:
 
     def is_visible(self, selector: str) -> bool:
         self.is_visible_calls.append(selector)
+        if selector in self._locator_visible:
+            return self._locator_visible[selector]
+        if selector == "#token" and (self._state == "otp_form" or self._otp_form_visible):
+            return True
         if self._state == "cas":
             return selector in ("#username", "#password", "#fm1", "#fm1 input[name='submit']", "#fm1 input[name='submit'][type='submit']")
         return False
@@ -408,6 +413,191 @@ class TestDisabledInitialSubmit:
         )
 
 
+class TestAlreadyAuthenticatedOrDirectRedirect:
+    def test_cas_url_redirects_directly_to_products(self):
+        settings = make_test_settings()
+        page = FakePage()
+        def goto_products(url, timeout=None, wait_until=None):
+            page.urls.append((url, timeout))
+            page.current_url = settings.cmp_products_url
+            page._state = "products"
+        page.goto = goto_products
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp
+        result = authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+        assert result is True
+        assert len(otp.poll_calls) == 0
+        assert page.fills.get("#username") is None
+
+    def test_cas_url_lands_directly_on_otp_form(self):
+        settings = make_test_settings()
+        page = FakePage()
+        def goto_otp(url, timeout=None, wait_until=None):
+            page.urls.append((url, timeout))
+            page.current_url = url
+            page._state = "otp_form"
+        page.goto = goto_otp
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp
+        result = authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+        assert result is True
+        assert len(otp.poll_calls) == 1
+        assert page.fills.get("#username") is None
+        assert "#login input[name='_eventId_submit'][type='submit']" in page.clicks
+
+    def test_cas_url_redirects_directly_to_root_portal(self):
+        settings = make_test_settings()
+        page = FakePage()
+        def goto_root(url, timeout=None, wait_until=None):
+            page.urls.append((url, timeout))
+            if url == settings.cas_url:
+                page.current_url = "https://ep.iotcc.telkomsel.com/"
+                page._state = "root_portal"
+            elif url == settings.cmp_products_url:
+                page.current_url = settings.cmp_products_url
+                page._state = "products"
+            else:
+                page.current_url = url
+        page.goto = goto_root
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp
+        result = authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+        assert result is True
+        assert len(otp.poll_calls) == 0
+        assert page.fills.get("#username") is None
+
+    def test_foreign_host_redirect_is_rejected(self):
+        settings = make_test_settings(navigation_timeout_ms=100)
+        page = FakePage()
+        def goto_foreign(url, timeout=None, wait_until=None):
+            page.urls.append((url, timeout))
+            page.current_url = "https://evil-ep.iotcc.telkomsel.com/#!products"
+            page._state = "products"
+        page.goto = goto_foreign
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        with pytest.raises(AuthenticationError):
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+    def test_non_default_port_redirect_is_rejected(self):
+        settings = make_test_settings(navigation_timeout_ms=100)
+        page = FakePage()
+        def goto_port(url, timeout=None, wait_until=None):
+            page.urls.append((url, timeout))
+            page.current_url = "https://ep.iotcc.telkomsel.com:8443/#!products"
+            page._state = "products"
+        page.goto = goto_port
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        with pytest.raises(AuthenticationError):
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+    def test_embedded_credentials_redirect_is_rejected(self):
+        settings = make_test_settings(navigation_timeout_ms=100)
+        page = FakePage()
+        def goto_creds(url, timeout=None, wait_until=None):
+            page.urls.append((url, timeout))
+            page.current_url = "https://user:pass@ep.iotcc.telkomsel.com/#!products"
+            page._state = "products"
+        page.goto = goto_creds
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        with pytest.raises(AuthenticationError):
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+    def test_subdomain_lookalike_redirect_is_rejected(self):
+        settings = make_test_settings(navigation_timeout_ms=100)
+        page = FakePage()
+        def goto_lookalike(url, timeout=None, wait_until=None):
+            page.urls.append((url, timeout))
+            page.current_url = "https://ep.iotcc.telkomsel.com.evil.example/#!products"
+            page._state = "products"
+        page.goto = goto_lookalike
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        with pytest.raises(AuthenticationError):
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+    def test_malformed_port_redirect_is_rejected(self):
+        settings = make_test_settings(navigation_timeout_ms=100)
+        page = FakePage()
+        def goto_malformed(url, timeout=None, wait_until=None):
+            page.urls.append((url, timeout))
+            page.current_url = "https://ep.iotcc.telkomsel.com:notaport/#!products"
+            page._state = "products"
+        page.goto = goto_malformed
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        with pytest.raises(AuthenticationError):
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+    def test_empty_port_redirect_is_rejected(self):
+        settings = make_test_settings(navigation_timeout_ms=100)
+        page = FakePage()
+        def goto_empty_port(url, timeout=None, wait_until=None):
+            page.urls.append((url, timeout))
+            page.current_url = "https://ep.iotcc.telkomsel.com:/#!products"
+            page._state = "products"
+        page.goto = goto_empty_port
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        with pytest.raises(AuthenticationError):
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+    def test_closed_page_raises_sanitized_authentication_error(self):
+        settings = make_test_settings()
+
+        class ClosedPage:
+            def goto(self, *args, **kwargs):
+                raise RuntimeError("Target page, context or browser has been closed")
+
+            def set_default_timeout(self, timeout):
+                pass
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        otp = FakeOtpProvider()
+
+        with pytest.raises(AuthenticationError) as exc_info:
+            authenticate_cmp(settings=settings, otp_provider=otp, page=ClosedPage())
+
+        assert "Target page" not in str(exc_info.value)
+        assert str(exc_info.value) == "Authentication failed"
+
+    def test_delayed_password_rendering_waits_for_both_fields(self):
+        settings = make_test_settings()
+        page = FakePage()
+        page._state = "cas"
+        # Hide password field initially
+        page._locator_visible["#password"] = False
+        otp = FakeOtpProvider()
+
+        class ClockAdvancingPassword(FakeClock):
+            def sleep(self, seconds):
+                super().sleep(seconds)
+                # Enable password field on 2nd sleep call
+                if len(self.sleep_calls) >= 2:
+                    page._locator_visible["#password"] = True
+
+        from cmp_auth import authenticate_cmp
+        result = authenticate_cmp(settings=settings, otp_provider=otp, page=page, clock=ClockAdvancingPassword())
+
+        assert result is True
+        assert page.fills.get("#username") == "test_user"
+        assert page.fills.get("#password") == "test_pass"
+
+
 class TestAuthenticationFailure:
     def test_bad_username_raises(self):
         # This test verifies error handling
@@ -491,3 +681,67 @@ class TestFragmentBasedSuccessDetection:
         from cmp_auth import AuthenticationError
         with pytest.raises(AuthenticationError, match="timed out"):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+
+class TestOtpRejectionDetection:
+    """Regression coverage for the observed live failure where the OTP is
+    submitted but CAS returns to the login page (OTP rejected / session expired).
+
+    Live evidence (DEBUG logs): the OTP was retrieved and submitted, yet the page
+    stayed on ``/cas/login``. The flow must surface an accurate, sanitized error
+    instead of masking the rejection as a generic "Navigation to portal timed out"
+    after the full navigation window elapses.
+    """
+
+    def test_otp_rejection_raises_sanitized_error(self):
+        settings = make_test_settings(navigation_timeout_ms=100)
+        page = FakePage()
+
+        # Model CAS rejecting the OTP: after OTP submit the portal bounces back
+        # to the CAS login form (the observed live behaviour) instead of the
+        # root portal / products page.
+        original_click = page.click
+
+        def rejecting_click(selector, timeout=None):
+            original_click(selector, timeout)
+            if selector == "#login input[name='_eventId_submit'][type='submit']":
+                page._state = "cas"
+                page.current_url = settings.cas_url
+
+        page.click = rejecting_click
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+
+        with pytest.raises(AuthenticationError, match="OTP rejected") as exc_info:
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+        # Sanitized: no credentials, OTP, or raw exception text leak.
+        assert "OTP rejected" in str(exc_info.value)
+        assert "Target page" not in str(exc_info.value)
+        # The initial credential submit still happened before the OTP attempt.
+        assert "#fm1 input[name='submit'][type='submit']" in page.clicks
+        assert "#login input[name='_eventId_submit'][type='submit']" in page.clicks
+
+    def test_otp_rejection_does_not_navigate_to_dashboard(self):
+        # The rejected-OTP path must not perform a direct goto to #!dashboard;
+        # it must only raise once the login form is observed again.
+        settings = make_test_settings(navigation_timeout_ms=100)
+        page = FakePage()
+        original_click = page.click
+
+        def rejecting_click(selector, timeout=None):
+            original_click(selector, timeout)
+            if selector == "#login input[name='_eventId_submit'][type='submit']":
+                page._state = "cas"
+                page.current_url = settings.cas_url
+
+        page.click = rejecting_click
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        with pytest.raises(AuthenticationError):
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+        # No direct navigation to the dashboard URL was triggered.
+        assert all("dashboard" not in str(u) for (u, _t) in page.urls)

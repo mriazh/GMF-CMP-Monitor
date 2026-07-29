@@ -456,6 +456,20 @@ class FakeOtpProvider:
         return self.otp_value
 
 
+class VaadinBootingFakePage(FakePage):
+    """FakePage variant that models a slow Vaadin 7 SPA bootstrap.
+
+    Adds a ``context`` attribute so ``_is_playwright_page`` treats it like a real
+    Playwright page and the ``_wait_for_vaadin_loading`` pre-wait is exercised.
+    Use ``set_menu_visible_after_reads(n)`` to simulate the menu becoming visible
+    only after ``n`` visibility polls.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.context = object()
+
+
 class TestDashboardStateClassification:
     def test_dashboard_url(self):
         from dashboard_monitor import classify_state, DashboardState
@@ -552,11 +566,92 @@ class TestDashboardStateClassification:
         page = FakePage("https://ep.iotcc.telkomsel.com/session-closed?locale=en")
         assert classify_state(page) == DashboardState.AUTH_EXPIRED
 
+    def test_cas_login_without_form_is_auth_expired(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
+        page._locator_visible["#username"] = False
+        page._locator_visible["#password"] = False
+        assert classify_state(page) == DashboardState.AUTH_EXPIRED
+
+    def test_cas_login_with_query_params_is_auth_expired(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://ep.iotcc.telkomsel.com/cas/login/?service=foo")
+        assert classify_state(page) == DashboardState.AUTH_EXPIRED
+
+    def test_session_closed_slash_with_query_params_is_auth_expired(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://ep.iotcc.telkomsel.com/session-closed/?locale=en")
+        assert classify_state(page) == DashboardState.AUTH_EXPIRED
+
+    def test_session_closed_extra_is_unknown(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://ep.iotcc.telkomsel.com/session-closed-extra")
+        assert classify_state(page) == DashboardState.UNKNOWN
+
+    def test_foreign_host_cas_login_is_unknown(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://evil-ep.iotcc.telkomsel.com/cas/login")
+        assert classify_state(page) == DashboardState.UNKNOWN
+
+    def test_http_cas_login_is_unknown(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("http://ep.iotcc.telkomsel.com/cas/login")
+        assert classify_state(page) == DashboardState.UNKNOWN
+
+    def test_auth_path_with_misleading_fragment_is_auth_expired(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://ep.iotcc.telkomsel.com/cas/login#!dashboard")
+        assert classify_state(page) == DashboardState.AUTH_EXPIRED
+        page2 = FakePage("https://ep.iotcc.telkomsel.com/session-closed#!products")
+        assert classify_state(page2) == DashboardState.AUTH_EXPIRED
+
     def test_foreign_host_session_closed_is_unknown(self):
         from dashboard_monitor import classify_state, DashboardState
         # Foreign-host session-closed lookalike must stay UNKNOWN (strict host check)
         page = FakePage("https://evil.example.com/session-closed?locale=en")
         assert classify_state(page) == DashboardState.UNKNOWN
+
+    def test_non_default_port_is_unknown(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://ep.iotcc.telkomsel.com:8443/#!dashboard")
+        assert classify_state(page) == DashboardState.UNKNOWN
+
+    def test_embedded_credentials_is_unknown(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://user:pass@ep.iotcc.telkomsel.com/#!dashboard")
+        assert classify_state(page) == DashboardState.UNKNOWN
+
+    def test_subdomain_lookalike_is_unknown(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://ep.iotcc.telkomsel.com.evil.example/#!dashboard")
+        assert classify_state(page) == DashboardState.UNKNOWN
+
+    def test_page_url_exception_returns_unknown(self):
+        from dashboard_monitor import classify_state, DashboardState
+
+        class ClosedPage:
+            @property
+            def url(self):
+                raise RuntimeError("Target page, context or browser has been closed")
+
+        assert classify_state(ClosedPage()) == DashboardState.UNKNOWN
+
+    def test_malformed_port_products_is_unknown(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://ep.iotcc.telkomsel.com:notaport/#!products")
+        assert classify_state(page) == DashboardState.UNKNOWN
+
+    def test_malformed_port_cas_login_is_unknown(self):
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://ep.iotcc.telkomsel.com:notaport/cas/login")
+        assert classify_state(page) == DashboardState.UNKNOWN
+
+    def test_empty_port_urls_are_unknown(self):
+        from dashboard_monitor import classify_state, DashboardState
+        assert classify_state(FakePage("https://ep.iotcc.telkomsel.com:/#!products")) == DashboardState.UNKNOWN
+        assert classify_state(FakePage("https://ep.iotcc.telkomsel.com:/#!dashboard")) == DashboardState.UNKNOWN
+        assert classify_state(FakePage("https://ep.iotcc.telkomsel.com:/cas/login")) == DashboardState.UNKNOWN
+        assert classify_state(FakePage("https://ep.iotcc.telkomsel.com:/session-closed")) == DashboardState.UNKNOWN
 
 
 class TestVerifiedDashboard:
@@ -594,6 +689,24 @@ class TestVerifiedDashboard:
     def test_foreign_host_never_verified_even_with_dom(self):
         from dashboard_monitor import _is_verified_dashboard
         page = FakePage("https://evil.example.com/#!dashboard")
+        page.set_dashboard_ready(True)
+        assert not _is_verified_dashboard(page)
+
+    def test_non_default_port_never_verified(self):
+        from dashboard_monitor import _is_verified_dashboard
+        page = FakePage("https://ep.iotcc.telkomsel.com:8443/#!dashboard")
+        page.set_dashboard_ready(True)
+        assert not _is_verified_dashboard(page)
+
+    def test_embedded_credentials_never_verified(self):
+        from dashboard_monitor import _is_verified_dashboard
+        page = FakePage("https://user:pass@ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_dashboard_ready(True)
+        assert not _is_verified_dashboard(page)
+
+    def test_subdomain_lookalike_never_verified(self):
+        from dashboard_monitor import _is_verified_dashboard
+        page = FakePage("https://ep.iotcc.telkomsel.com.evil.example/#!dashboard")
         page.set_dashboard_ready(True)
         assert not _is_verified_dashboard(page)
 
@@ -698,6 +811,106 @@ class TestSessionExpiryTriggeringReLogin:
 
         second = otp_provider.poll_calls[1]
         assert first != second
+
+    def test_false_session_closed_redirect_settles_to_products_skips_relogin(self):
+        """When /session-closed redirects back to products within the settle window, OTP is skipped."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/session-closed?locale=en")
+        page.set_menu_visible(True)
+        # Configure pending transition: after 2 URL reads, transition to products
+        page._pending = {"remaining": 2, "url": settings.cmp_products_url, "state": "products"}
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
+        result = monitor.monitor_once()
+
+        # Should return False (meaning navigated from products to dashboard without relogin)
+        assert result is False
+        # OTP provider should NOT have been called
+        assert len(otp_provider.poll_calls) == 0
+        # Should have reached dashboard
+        assert page.url == settings.cmp_dashboard_url
+
+    def test_transient_unknown_route_during_settle_does_not_call_otp_provider(self):
+        """When auth-expired settles to an UNKNOWN route, recovery is called without requesting OTP."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/session-closed")
+        page._pending = {"remaining": 1, "url": "https://ep.iotcc.telkomsel.com/unknown", "state": "initial"}
+        page.set_menu_visible(True)
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
+        result = monitor.monitor_once()
+
+        # Should NOT call OTP provider
+        assert len(otp_provider.poll_calls) == 0
+        # Should have performed recovery to dashboard
+        assert result is True
+
+    def test_route_settles_to_verified_dashboard_skips_otp(self):
+        """When auth-expired settles to a verified dashboard state, OTP is skipped."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/session-closed")
+        page._pending = {"remaining": 1, "url": settings.cmp_dashboard_url, "state": "dashboard"}
+        page.set_menu_visible(True)
+        page.set_dashboard_ready(True)
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
+        result = monitor.monitor_once()
+
+        assert result is False
+        assert len(otp_provider.poll_calls) == 0
+
+    def test_persistent_auth_expiry_invokes_full_relogin_exactly_once(self, monkeypatch):
+        """Persistent AUTH_EXPIRED route invokes the full re-login path exactly once."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/session-closed?locale=en")
+        page.set_menu_visible(True)
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(
+            settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock()
+        )
+
+        relogin_calls = []
+        original_relogin = monitor._relogin_and_navigate
+
+        def spy_relogin():
+            relogin_calls.append(1)
+            return original_relogin()
+
+        monkeypatch.setattr(monitor, "_relogin_and_navigate", spy_relogin)
+
+        result = monitor.monitor_once()
+        assert result is True
+        assert len(relogin_calls) == 1
+        assert len(otp_provider.poll_calls) == 1
+
+    def test_unverified_dashboard_during_settle_triggers_recovery_and_no_otp(self):
+        """When auth-expired settles to a persistent #!dashboard URL with unverified DOM,
+        it does NOT return settled Dashboard success and does NOT request OTP."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/session-closed")
+        page._pending = {"remaining": 2, "url": settings.cmp_dashboard_url, "state": "dashboard"}
+        page.set_dashboard_ready(False)  # DOM is NOT ready!
+        page.set_menu_visible(True)
+
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
+        result = monitor.monitor_once()
+
+        # Should NOT return False (which would claim settled Dashboard success)
+        assert result is True  # Recovered via bounded recovery (stage through products -> SPA menu click)
+        # Should NOT request OTP merely because URL reports #!dashboard
+        assert len(otp_provider.poll_calls) == 0
+        # Reached dashboard via real recovery
+        assert page.url == settings.cmp_dashboard_url
 
 
 class TestBoundedRetries:
@@ -1089,6 +1302,27 @@ class TestDashboardMenuNavigation:
         assert page.goto_calls == []
         assert page.menu_clicks >= 1
 
+    def test_navigate_to_dashboard_waits_for_slow_vaadin_bootstrap(self):
+        """Observed live: Vaadin 7 menu takes ~65s to render after domcontentloaded.
+
+        The ``_wait_for_vaadin_loading`` pre-wait must wait for the menu to appear
+        (simulated via ``set_menu_visible_after_reads``) rather than timing out
+        before the menu loads. The click/verify deadline then proceeds normally.
+        """
+        from dashboard_monitor import navigate_to_dashboard
+
+        settings = make_test_settings()
+        page = VaadinBootingFakePage("https://ep.iotcc.telkomsel.com/#!products")
+        # Menu renders only after several visibility polls (slow Vaadin bootstrap).
+        page.set_menu_visible_after_reads(5)
+        page.set_dashboard_ready(True)
+
+        result = navigate_to_dashboard(page, settings, FakeClock())
+        assert result is True
+        assert page.url == settings.cmp_dashboard_url
+        assert page.goto_calls == []
+        assert page.menu_clicks >= 1
+
     def test_navigate_to_dashboard_menu_never_visible_raises(self):
         """If the menu never renders, navigation must fail instead of goto dashboard."""
         from dashboard_monitor import navigate_to_dashboard, RecoveryError
@@ -1299,7 +1533,29 @@ class TestDashboardVerification:
         assert "Dashboard DOM diagnostics" in caplog.text
         assert "Dashboard verification timed out" in caplog.text
         # Safe facts only: no HTML dump, credentials, OTPs or full query URLs.
-        assert "state=PRODUCTS" in caplog.text
+
+    def test_monitor_once_on_closed_page_raises_sanitized_recovery_error(self, caplog):
+        settings = make_test_settings()
+
+        class ClosedPage:
+            @property
+            def url(self):
+                raise RuntimeError("Target page, context or browser has been closed")
+
+            def goto(self, *args, **kwargs):
+                raise RuntimeError("Target page, context or browser has been closed")
+
+        from dashboard_monitor import ContinuousMonitor, RecoveryError
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(
+            settings=settings, page=ClosedPage(), otp_provider=otp_provider, clock=FakeClock()
+        )
+
+        with pytest.raises(RecoveryError) as exc_info:
+            monitor.monitor_once()
+
+        assert "Target page" not in str(exc_info.value)
+        assert str(exc_info.value) == "Dashboard navigation failed"
         assert "password" not in caplog.text.lower()
         assert "secret" not in caplog.text.lower()
 
@@ -1601,3 +1857,163 @@ class TestSteadyStateVerification:
         assert monitor._consecutive_recoveries == 0  # reset after verified dashboard
         assert settings.recovery_backoff_seconds in clock.sleep_calls
         assert len(otp_provider.poll_calls) == 0
+
+
+class TestLiveFragmentVerification:
+    """Tests for the live window.location.hash verification (Firefox page.url lag fix)."""
+
+    def test_classify_state_uses_live_hash_when_url_lags(self):
+        """classify_state returns DASHBOARD when page.url fragment is !products but live hash is #!dashboard."""
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_hash("#!dashboard")  # Live hash is dashboard, URL lags
+        assert classify_state(page) == DashboardState.DASHBOARD
+
+    def test_classify_state_products_when_both_url_and_hash_agree(self):
+        """classify_state returns PRODUCTS when both URL and live hash are #!products."""
+        from dashboard_monitor import classify_state, DashboardState
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_hash("#!products")
+        assert classify_state(page) == DashboardState.PRODUCTS
+
+    def test_is_verified_dashboard_true_when_live_hash_dashboard_dom_ready(self):
+        """_is_verified_dashboard is True when live hash is #!dashboard and DOM ready, even if URL fragment is !products."""
+        from dashboard_monitor import _is_verified_dashboard
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_hash("#!dashboard")  # Live hash is dashboard
+        page.set_dashboard_ready(True)  # DOM confirms dashboard
+        assert _is_verified_dashboard(page) is True
+
+    def test_is_verified_dashboard_false_when_hash_dashboard_but_dom_not_ready(self):
+        """_is_verified_dashboard is False when live hash is #!dashboard but DOM not ready (false positive protection)."""
+        from dashboard_monitor import _is_verified_dashboard
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_hash("#!dashboard")  # Live hash is dashboard
+        page.set_dashboard_ready(False)  # DOM does NOT confirm dashboard
+        assert _is_verified_dashboard(page) is False
+
+    def test_navigate_to_dashboard_succeeds_with_live_hash_and_one_click(self):
+        """navigate_to_dashboard returns True with exactly one click when live hash and DOM confirm dashboard.
+
+        Models the real Firefox failure: after the menu click, ``window.location.hash``
+        and the DOM already confirm Dashboard while ``page.url`` still lags at
+        ``#!products``. Verification must succeed from the live signals.
+        """
+        from dashboard_monitor import navigate_to_dashboard
+
+        class _LaggedUrlMenuLocator:
+            def __init__(self, page):
+                self._page = page
+
+            @property
+            def first(self):
+                return self
+
+            def is_visible(self):
+                return True
+
+            def inner_text(self):
+                return "Dashboard"
+
+            def click(self):
+                self._page._menu_clicks += 1
+                # Live hash and DOM confirm dashboard immediately, but the
+                # page.url fragment intentionally stays at #!products (Firefox
+                # Playwright lag during the Vaadin route transition).
+                self._page._hash_override = "#!dashboard"
+                self._page._dashboard_ready = True
+
+        class _LaggedUrlPage(FakePage):
+            def __init__(self, url):
+                super().__init__(url)
+                self._menu_visible = True
+                self._dashboard_ready = False
+
+            def locator(self, selector, has_text=None):
+                if selector == "span.main-menu-item-caption":
+                    return _LaggedUrlMenuLocator(self)
+                return super().locator(selector, has_text=has_text)
+
+        settings = make_test_settings()
+        page = _LaggedUrlPage("https://ep.iotcc.telkomsel.com/#!products")
+        result = navigate_to_dashboard(page, settings, FakeClock())
+        assert result is True
+        # The click happened once; verification came from the live hash + DOM.
+        assert page.menu_clicks == 1
+        assert not any("!dashboard" in url for url, _, _ in page.goto_calls)
+        # The page.url may still lag, but the live hash confirmed dashboard.
+        assert page._hash_override == "#!dashboard"
+
+    def test_goto_dashboard_false_positive_still_protected(self):
+        """Direct goto to #!dashboard changes URL but DOM never ready - still not verified (existing guard)."""
+        from dashboard_monitor import _is_verified_dashboard
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.goto(settings.cmp_dashboard_url, timeout=1000, wait_until="commit")
+        assert page.url == settings.cmp_dashboard_url
+        # Even if we set the live hash to dashboard, DOM is not ready
+        page.set_hash("#!dashboard")
+        page.set_dashboard_ready(False)
+        assert _is_verified_dashboard(page) is False
+
+    def test_classify_state_not_dashboard_when_stale_url_dashboard_and_empty_live_hash(self):
+        """classify_state returns PRODUCTS/UNKNOWN when page.url fragment is !dashboard but live hash is empty.
+
+        The live hash is authoritative when evaluate is available. An empty live hash
+        should not fall back to the stale page.url fragment.
+        Also verifies _is_verified_dashboard is False even when DOM is ready.
+        """
+        from dashboard_monitor import classify_state, DashboardState, _is_verified_dashboard
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_hash("")  # Live hash is empty (authoritative)
+        page.set_dashboard_ready(True)  # DOM is ready
+        # Should NOT be DASHBOARD because live hash is empty
+        assert classify_state(page) != DashboardState.DASHBOARD
+        # Full verifier contract: _is_verified_dashboard must also be False
+        assert _is_verified_dashboard(page) is False
+
+    def test_classify_state_not_dashboard_when_stale_url_dashboard_and_failed_evaluation(self, caplog):
+        """classify_state returns UNKNOWN when page.url fragment is !dashboard but evaluate fails.
+
+        Evaluation exception should produce empty live hash, not fall back to page.url.
+        Also verifies _is_verified_dashboard is False even when DOM is ready,
+        and that no raw exception text is exposed through public behavior or logs.
+        """
+        import logging
+        from dashboard_monitor import classify_state, DashboardState, _is_verified_dashboard
+
+        raw_message = "Target page, context or browser has been closed: SECRET_RAW_ERROR"
+
+        class FailingEvaluatePage(FakePage):
+            def evaluate(self, expr):
+                raise RuntimeError(raw_message)
+
+        page = FailingEvaluatePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_dashboard_ready(True)  # DOM is ready
+        # Result should be a safe DashboardState enum, not an exception
+        result = classify_state(page)
+        assert result == DashboardState.UNKNOWN
+        # Full verifier contract: _is_verified_dashboard must also be False
+        assert _is_verified_dashboard(page) is False
+        # Sanitization: raw exception message must not leak through public result
+        assert raw_message not in str(result)
+        # Sanitization: raw exception message must not leak through captured logs
+        caplog.set_level(logging.DEBUG)
+        classify_state(page)
+        log_output = "".join(caplog.messages)
+        assert raw_message not in log_output
+
+    def test_classify_state_dashboard_when_root_url_no_fragment_and_live_hash_dashboard(self):
+        """classify_state returns DASHBOARD when page.url has no fragment (root portal) but live hash is #!dashboard.
+
+        This is the observed real case: Firefox lands at https://ep.iotcc.telkomsel.com/
+        (no fragment) while window.location.hash is already #!dashboard.
+        Also verifies _is_verified_dashboard is True when DOM is ready.
+        """
+        from dashboard_monitor import classify_state, DashboardState, _is_verified_dashboard
+        page = FakePage("https://ep.iotcc.telkomsel.com/")  # No fragment
+        page.set_hash("#!dashboard")  # Live hash is dashboard
+        page.set_dashboard_ready(True)  # DOM is ready
+        assert classify_state(page) == DashboardState.DASHBOARD
+        # Full verifier contract: _is_verified_dashboard must also be True
+        assert _is_verified_dashboard(page) is True

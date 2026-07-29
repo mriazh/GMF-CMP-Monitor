@@ -74,6 +74,32 @@ class TestApprovedUrls:
         assert settings.cmp_products_url == "https://ep.iotcc.telkomsel.com/#!products"
         assert settings.cmp_dashboard_url == "https://ep.iotcc.telkomsel.com/#!dashboard"
 
+    def test_cmp_url_with_empty_port_rejected(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com:/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+        }
+        with pytest.raises(ConfigError, match="must not specify a port"):
+            load_settings(env=env)
+
+    def test_cmp_url_with_malformed_port_rejected(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com:notaport/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+        }
+        with pytest.raises(ConfigError, match="must not specify a port"):
+            load_settings(env=env)
+
 
 class TestCasUrlValidation:
     """Tests for CAS URL validation using approved host validator."""

@@ -22,3 +22,6 @@ browser_state/
 artifacts/
 runtime_artifacts/
 *.log
+
+# Local agent handoff context
+CONTEXT.md
