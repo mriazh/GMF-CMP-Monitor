@@ -40,6 +40,7 @@ def make_test_settings(**overrides) -> Settings:
         "recovery_retry_limit": 3,
         "recovery_backoff_seconds": 5,
         "headless": False,
+        "firefox_executable_path": None,
         "runtime_artifact_dir": None,
         "browser_storage_state_path": None,
         "log_level": "INFO",
@@ -66,6 +67,7 @@ class FakePage:
         self._locator_visible = {}
         self.fills = {}
         self.clicks = []
+        self.menu_click_timeouts = []
         self.inputs = {}
         self.default_timeout = 30000
         self._state = "initial"
@@ -364,7 +366,8 @@ class FakeMenuLocator:
     def inner_text(self):
         return self._has_text or "Dashboard"
 
-    def click(self):
+    def click(self, timeout=None, no_wait_after=None):
+        self._page.menu_click_timeouts.append(timeout)
         if not self._visible:
             raise RuntimeError("Dashboard menu not visible")
         self._page._menu_clicks += 1
@@ -711,7 +714,155 @@ class TestVerifiedDashboard:
         assert not _is_verified_dashboard(page)
 
 
+class TestDashboardMenuNavigationTiming:
+    def test_slow_menu_click_within_budget_is_verified_without_action_timeout(self):
+        """A 28-second SPA transition remains valid when click does not await navigation."""
+        from dashboard_monitor import navigate_to_dashboard
+
+        class SteadyClock:
+            def __init__(self):
+                self.current_time = 0.0
+
+            def now(self):
+                return self.current_time
+
+            def sleep(self, seconds):
+                self.current_time += seconds
+
+        clock = SteadyClock()
+
+        class SlowMenuLocator(FakeMenuLocator):
+            def click(self, timeout=None, no_wait_after=None):
+                self._page.menu_click_timeouts.append(timeout)
+                self._page.menu_no_wait_after.append(no_wait_after)
+                if no_wait_after is not True:
+                    # Model Playwright waiting for the unresolved route until
+                    # the complete action timeout is consumed.
+                    clock.current_time += (timeout or 0) / 1000.0
+                    raise RuntimeError("menu click action timed out")
+                self._page._menu_clicks += 1
+                self._page._pending = {
+                    "remaining": 28,
+                    "url": self._page._dashboard_url,
+                    "state": "dashboard",
+                    "ready": True,
+                }
+
+        class SlowMenuPage(FakePage):
+            def locator(self, selector, has_text=None):
+                if selector == "span.main-menu-item-caption":
+                    return SlowMenuLocator(self, has_text=has_text, visible=True)
+                return super().locator(selector, has_text=has_text)
+
+        settings = make_test_settings(navigation_timeout_ms=60000)
+        page = SlowMenuPage(settings.cmp_products_url)
+        page.menu_no_wait_after = []
+
+        assert navigate_to_dashboard(page, settings, clock=clock) is True
+        assert page.menu_clicks == 1
+        assert page.menu_no_wait_after == [True]
+        assert clock.current_time < settings.navigation_timeout_ms / 1000
+
+    def test_unresolved_menu_click_uses_configured_recovery_retry(self):
+        """A second failed bounded attempt gets another configured recovery attempt."""
+        from dashboard_monitor import ContinuousMonitor
+
+        class SteadyClock:
+            def __init__(self):
+                self.current_time = 0.0
+
+            def now(self):
+                return self.current_time
+
+            def sleep(self, seconds):
+                self.current_time += seconds
+
+        class UnresolvedMenuLocator(FakeMenuLocator):
+            def click(self, timeout=None, no_wait_after=None):
+                self._page.menu_click_timeouts.append(timeout)
+                self._page.menu_no_wait_after.append(no_wait_after)
+                self._page._menu_clicks += 1
+                if self._page._menu_clicks < 3:
+                    # The real click returns, but the SPA never produces a
+                    # verifiable route transition in this bounded attempt.
+                    return
+                self._page._url = self._page._dashboard_url
+                self._page._state = "dashboard"
+                self._page._dashboard_ready = True
+
+        class UnresolvedMenuPage(FakePage):
+            def locator(self, selector, has_text=None):
+                if selector == "span.main-menu-item-caption":
+                    return UnresolvedMenuLocator(self, has_text=has_text, visible=True)
+                return super().locator(selector, has_text=has_text)
+
+        settings = make_test_settings(
+            navigation_timeout_ms=5000,
+            recovery_backoff_seconds=2,
+            recovery_retry_limit=2,
+        )
+        page = UnresolvedMenuPage(settings.cmp_products_url)
+        page.menu_no_wait_after = []
+        monitor = ContinuousMonitor(
+            settings=settings,
+            page=page,
+            otp_provider=FakeOtpProvider(),
+            clock=SteadyClock(),
+        )
+
+        assert monitor.monitor_once() is True
+
+        assert page.menu_clicks == 3
+        assert page.menu_no_wait_after == [True, True, True]
+        assert monitor._consecutive_recoveries == 0
+
+    def test_click_passes_remaining_budget_to_menu(self):
+        settings = make_test_settings(navigation_timeout_ms=5000)
+        page = FakePage(url=settings.cmp_products_url)
+        page.set_menu_visible(True)
+
+        class DeterministicClock:
+            def __init__(self):
+                self.current_time = 1700000000.0
+
+            def now(self):
+                return self.current_time
+
+            def sleep(self, seconds):
+                self.current_time += seconds
+
+        from dashboard_monitor import navigate_to_dashboard
+
+        assert navigate_to_dashboard(page, settings, clock=DeterministicClock()) is True
+        assert page.menu_click_timeouts
+        assert page.menu_click_timeouts[0] == settings.navigation_timeout_ms
+
+    def test_failed_menu_click_cannot_mark_dashboard_verified(self):
+        settings = make_test_settings(navigation_timeout_ms=5000)
+
+        class FailingMenuLocator(FakeMenuLocator):
+            def click(self, timeout=None, no_wait_after=None):
+                self._page.menu_click_timeouts.append(timeout)
+                self._page._hash_override = "#!dashboard"
+                self._page._dashboard_ready = True
+                raise RuntimeError("menu click failed")
+
+        class FailingMenuPage(FakePage):
+            def locator(self, selector, has_text=None):
+                if selector == "span.main-menu-item-caption":
+                    return FailingMenuLocator(self, has_text=has_text, visible=True)
+                return super().locator(selector, has_text=has_text)
+
+        page = FailingMenuPage(url=settings.cmp_products_url)
+
+        from dashboard_monitor import RecoveryError, navigate_to_dashboard
+
+        with pytest.raises(RecoveryError):
+            navigate_to_dashboard(page, settings, clock=FakeClock())
+
+
 class TestProductsRedirectBackToDashboard:
+
     def test_products_to_dashboard(self):
         settings = make_test_settings()
         page = FakePage(url="https://ep.iotcc.telkomsel.com/#!products")
@@ -912,6 +1063,66 @@ class TestSessionExpiryTriggeringReLogin:
         # Reached dashboard via real recovery
         assert page.url == settings.cmp_dashboard_url
 
+    def test_transient_authentication_error_retries_and_succeeds(self, monkeypatch):
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
+        page.set_menu_visible(True)
+
+        from cmp_auth import AuthenticationError
+        import dashboard_monitor
+        from dashboard_monitor import ContinuousMonitor
+
+        otp_provider = FakeOtpProvider()
+        clock = FakeClock()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=clock)
+
+        original_authenticate = dashboard_monitor.authenticate_cmp
+        auth_attempts = []
+
+        def failing_then_succeeding_auth(*args, **kwargs):
+            auth_attempts.append(len(auth_attempts) + 1)
+            if len(auth_attempts) == 1:
+                raise AuthenticationError("OTP form timeout")
+            return original_authenticate(*args, **kwargs)
+
+        monkeypatch.setattr(dashboard_monitor, "authenticate_cmp", failing_then_succeeding_auth)
+
+        result = monitor.monitor_once()
+
+        assert result is True
+        assert len(auth_attempts) == 2
+        assert len(otp_provider.poll_calls) == 1
+        assert settings.recovery_backoff_seconds in clock.sleep_calls
+        assert page.url == settings.cmp_dashboard_url
+        assert monitor._consecutive_recoveries == 0
+
+    def test_repeated_authentication_errors_raise_recovery_exhausted(self, monkeypatch):
+        settings = make_test_settings(recovery_retry_limit=3)
+        page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
+        page.set_menu_visible(True)
+
+        from cmp_auth import AuthenticationError
+        import dashboard_monitor
+        from dashboard_monitor import ContinuousMonitor, RecoveryExhaustedError
+
+        otp_provider = FakeOtpProvider()
+        clock = FakeClock()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=clock)
+
+        auth_attempts = []
+
+        def failing_auth(*args, **kwargs):
+            auth_attempts.append(len(auth_attempts) + 1)
+            raise AuthenticationError("Persistent login failure")
+
+        monkeypatch.setattr(dashboard_monitor, "authenticate_cmp", failing_auth)
+
+        with pytest.raises(RecoveryExhaustedError):
+            monitor.monitor_once()
+
+        assert len(auth_attempts) == 3
+        assert clock.sleep_calls.count(settings.recovery_backoff_seconds) >= 2
+
 
 class TestBoundedRetries:
     def test_recovery_retry_limit_capped(self):
@@ -948,6 +1159,21 @@ class TestBoundedRetries:
         page._url = "https://unknown.com"
         assert monitor.monitor_once() is True
         assert monitor._consecutive_recoveries == 0
+
+    def test_recovery_logs_dashboard_recovery_completed(self, caplog):
+        """Dashboard recovery must log 'Dashboard recovery completed' without requesting OTP."""
+        import logging
+        caplog.set_level(logging.INFO)
+        settings = make_test_settings()
+        page = FakePage("https://unknown.com")
+        page.set_menu_visible(True)
+        from dashboard_monitor import ContinuousMonitor
+        otp_provider = FakeOtpProvider()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
+
+        monitor.monitor_once()
+        assert "Dashboard recovery completed" in caplog.text
+        assert len(otp_provider.poll_calls) == 0
 
 
 class TestUnknownUrlHandling:
@@ -1008,7 +1234,7 @@ class TestUnknownUrlHandling:
         # Counter reset
         assert monitor._consecutive_recoveries == 0
 
-    def test_failed_navigation_retains_counter(self):
+    def test_failed_navigation_exhausts_configured_retry_limit(self):
         settings = make_test_settings(recovery_retry_limit=3)
         page = FakePage("https://unknown.com")
 
@@ -1017,22 +1243,11 @@ class TestUnknownUrlHandling:
             raise RuntimeError("Navigation failed")
         page.goto = failing_goto
 
-        from dashboard_monitor import ContinuousMonitor, RecoveryError
+        from dashboard_monitor import ContinuousMonitor, RecoveryError, RecoveryExhaustedError
         otp_provider = FakeOtpProvider()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
-        # First attempt: navigation fails, counter incremented, limit not exceeded yet
-        with pytest.raises(RecoveryError):
-            monitor.monitor_once()
-        assert monitor._consecutive_recoveries == 1
-
-        # Second attempt
-        with pytest.raises(RecoveryError):
-            monitor.monitor_once()
-        assert monitor._consecutive_recoveries == 2
-
-        # Third attempt: limit exceeded
-        from dashboard_monitor import RecoveryExhaustedError
+        # A recovery failure is retried internally until the configured limit.
         with pytest.raises(RecoveryExhaustedError):
             monitor.monitor_once()
         assert monitor._consecutive_recoveries == 3
@@ -1047,15 +1262,15 @@ class TestUnknownUrlHandling:
             page._navigations.append(url)
         page.goto = goto_wrong_url
 
-        from dashboard_monitor import ContinuousMonitor, RecoveryError
+        from dashboard_monitor import ContinuousMonitor, RecoveryError, RecoveryExhaustedError
         otp_provider = FakeOtpProvider()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
-        # Should raise because recovery didn't reach dashboard
-        with pytest.raises(RecoveryError, match="could not verify dashboard"):
+        # Failed recovery attempts are bounded by the configured limit and do
+        # not reset the counter because no dashboard was verified.
+        with pytest.raises(RecoveryExhaustedError):
             monitor.monitor_once()
-        # Counter should NOT be reset
-        assert monitor._consecutive_recoveries == 1
+        assert monitor._consecutive_recoveries == 3
 
     def test_exhaustion_at_configured_limit(self):
         settings = make_test_settings(recovery_retry_limit=2)
@@ -1067,16 +1282,11 @@ class TestUnknownUrlHandling:
             page._navigations.append(url)
         page.goto = goto_wrong_url
 
-        from dashboard_monitor import ContinuousMonitor, RecoveryError, RecoveryExhaustedError
+        from dashboard_monitor import ContinuousMonitor, RecoveryExhaustedError
         otp_provider = FakeOtpProvider()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
-        # First attempt: recovery fails, counter=1
-        with pytest.raises(RecoveryError, match="could not verify dashboard"):
-            monitor.monitor_once()
-        assert monitor._consecutive_recoveries == 1
-
-        # Second attempt - limit exceeded
+        # Recovery retries internally and exhausts the configured limit.
         with pytest.raises(RecoveryExhaustedError):
             monitor.monitor_once()
         assert monitor._consecutive_recoveries == 2
@@ -1156,14 +1366,14 @@ class TestDashboardReloadRecovery:
             raise RuntimeError("Navigation failed")
         page.goto = failing_goto
 
-        from dashboard_monitor import ContinuousMonitor, RecoveryError
+        from dashboard_monitor import ContinuousMonitor, RecoveryExhaustedError
         otp_provider = FakeOtpProvider()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
-        # First attempt: navigation fails, counter incremented
-        with pytest.raises(RecoveryError):
+        # Recovery retries internally until the configured limit.
+        with pytest.raises(RecoveryExhaustedError):
             monitor.monitor_once()
-        assert monitor._consecutive_recoveries == 1
+        assert monitor._consecutive_recoveries == 3
         assert len(otp_provider.poll_calls) == 0
 
     def test_dashboard_reload_to_unknown_recovery_exhaustion(self):
@@ -1182,21 +1392,70 @@ class TestDashboardReloadRecovery:
             page._navigations.append(url)
         page.goto = goto_wrong_url
 
-        from dashboard_monitor import ContinuousMonitor, RecoveryError, RecoveryExhaustedError
+        from dashboard_monitor import ContinuousMonitor, RecoveryExhaustedError
         otp_provider = FakeOtpProvider()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
-        # First attempt: recovery fails, counter=1
-        with pytest.raises(RecoveryError, match="could not verify dashboard"):
-            monitor.monitor_once()
-        assert monitor._consecutive_recoveries == 1
-        assert len(otp_provider.poll_calls) == 0
-
-        # Second attempt: limit exceeded
+        # Recovery retries internally and exhausts the configured limit.
         with pytest.raises(RecoveryExhaustedError, match="Maximum recovery attempts"):
             monitor.monitor_once()
         assert monitor._consecutive_recoveries == 2
         assert len(otp_provider.poll_calls) == 0
+
+    def test_dashboard_reload_route_settle_timeout_recovery_stages_via_products(self):
+        """Dashboard reload -> route settle timeout -> recovery on #!dashboard stages via products SPA shell."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
+
+        from dashboard_monitor import ContinuousMonitor, RecoveryError, RecoveryExhaustedError
+        otp_provider = FakeOtpProvider()
+        clock = FakeClock()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=clock)
+
+        def timing_out_route_settle():
+            raise RecoveryError("Route did not settle after reload")
+        monitor._wait_for_route_settle = timing_out_route_settle
+
+        result = monitor.monitor_once()
+
+        assert result is True
+        assert settings.cmp_products_url in page._navigations
+        assert page.url == settings.cmp_dashboard_url
+        assert monitor._consecutive_recoveries == 0
+        assert len(otp_provider.poll_calls) == 0
+
+    def test_distinguish_recovery_from_relogin_logs(self, caplog):
+        """Verify that dashboard recovery logs distinguish recovery from re-authentication."""
+        import logging
+        from dashboard_monitor import ContinuousMonitor
+        caplog.set_level(logging.INFO)
+        settings = make_test_settings()
+
+        # 1. Test Dashboard recovery logging (unknown state -> recovery, no auth)
+        page_rec = FakePage("https://unknown.com")
+        page_rec.set_menu_visible(True)
+        otp_rec = FakeOtpProvider()
+        monitor_rec = ContinuousMonitor(settings=settings, page=page_rec, otp_provider=otp_rec, clock=FakeClock())
+
+        res_rec = monitor_rec.monitor_once()
+        assert res_rec is True
+        assert len(otp_rec.poll_calls) == 0
+        assert "Dashboard recovery completed" in caplog.text
+        assert "Re-authentication successful" not in caplog.text
+
+        caplog.clear()
+
+        # 2. Test Re-authentication logging (CAS login state -> auth)
+        page_auth = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
+        page_auth.set_menu_visible(True)
+        otp_auth = FakeOtpProvider()
+        monitor_auth = ContinuousMonitor(settings=settings, page=page_auth, otp_provider=otp_auth, clock=FakeClock())
+
+        res_auth = monitor_auth.monitor_once()
+        assert res_auth is True
+        assert len(otp_auth.poll_calls) == 1
+        assert "Re-authentication successful, navigated to dashboard" in caplog.text
 
     def test_products_redirect_no_new_otp(self):
         """Products redirect should not request a new OTP."""
@@ -1506,6 +1765,41 @@ class TestDashboardVerification:
         # second real click) was required - never more.
         assert page.menu_clicks == 2
 
+    def test_bounced_retry_gets_a_fresh_navigation_budget(self):
+        """A slow first bounce must not consume the retry's full timeout budget."""
+        from dashboard_monitor import navigate_to_dashboard
+
+        class SteadyClock:
+            def __init__(self):
+                self.current_time = 0.0
+
+            def now(self):
+                return self.current_time
+
+            def sleep(self, seconds):
+                self.current_time += seconds
+
+        class SlowRetryPage(FakePage):
+            def _apply_transition(self, config):
+                super()._apply_transition(config)
+                if config["url"] == self._products_url and self._menu_clicks == 1:
+                    # The second real click needs its own full navigation window.
+                    self._click_transition_delay = 20
+
+        settings = make_test_settings(navigation_timeout_ms=25000)
+        page = SlowRetryPage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+        page.set_menu_click_bounce(
+            "https://ep.iotcc.telkomsel.com/#!products",
+            "products",
+            after_reads=10,
+            via_dashboard=True,
+        )
+
+        assert navigate_to_dashboard(page, settings, SteadyClock()) is True
+        assert page.url == settings.cmp_dashboard_url
+        assert page.menu_clicks == 2
+
     def test_post_click_unverified_diagnostics_are_emitted(self, caplog):
         """Throttled DEBUG diagnostics are emitted while verification is pending.
 
@@ -1545,17 +1839,17 @@ class TestDashboardVerification:
             def goto(self, *args, **kwargs):
                 raise RuntimeError("Target page, context or browser has been closed")
 
-        from dashboard_monitor import ContinuousMonitor, RecoveryError
+        from dashboard_monitor import ContinuousMonitor, RecoveryExhaustedError
         otp_provider = FakeOtpProvider()
         monitor = ContinuousMonitor(
             settings=settings, page=ClosedPage(), otp_provider=otp_provider, clock=FakeClock()
         )
 
-        with pytest.raises(RecoveryError) as exc_info:
+        with pytest.raises(RecoveryExhaustedError) as exc_info:
             monitor.monitor_once()
 
         assert "Target page" not in str(exc_info.value)
-        assert str(exc_info.value) == "Dashboard navigation failed"
+        assert str(exc_info.value) == "Maximum recovery attempts (3) exceeded"
         assert "password" not in caplog.text.lower()
         assert "secret" not in caplog.text.lower()
 
@@ -1915,7 +2209,7 @@ class TestLiveFragmentVerification:
             def inner_text(self):
                 return "Dashboard"
 
-            def click(self):
+            def click(self, timeout=None, no_wait_after=None):
                 self._page._menu_clicks += 1
                 # Live hash and DOM confirm dashboard immediately, but the
                 # page.url fragment intentionally stays at #!products (Firefox

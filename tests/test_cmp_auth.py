@@ -34,6 +34,7 @@ def make_test_settings(**overrides) -> Settings:
         "recovery_retry_limit": 3,
         "recovery_backoff_seconds": 5,
         "headless": False,
+        "firefox_executable_path": None,
         "runtime_artifact_dir": None,
         "browser_storage_state_path": None,
         "log_level": "INFO",
@@ -198,16 +199,18 @@ class FakeOtpProvider:
 
 
 class FakeClock:
-    def __init__(self):
+    def __init__(self, start_time: float = 1700000000.0):
+        self._current_time = start_time
         self.now_calls = []
         self.sleep_calls = []
 
     def now(self) -> float:
-        import time
-        return time.time()
+        self.now_calls.append(self._current_time)
+        return self._current_time
 
     def sleep(self, seconds: float):
         self.sleep_calls.append(seconds)
+        self._current_time += seconds
 
 
 class TestLoginSelectorFlow:
@@ -692,6 +695,156 @@ class TestOtpRejectionDetection:
     instead of masking the rejection as a generic "Navigation to portal timed out"
     after the full navigation window elapses.
     """
+
+    def test_stale_cas_form_persisting_1_9s_succeeds(self):
+        """A stale CAS form persisting 1.9s (just under the 2.0s grace period) transitions to root portal successfully."""
+        settings = make_test_settings()
+        page = FakePage()
+        otp = FakeOtpProvider()
+        clock = FakeClock(start_time=1000.0)
+
+        original_click = page.click
+        def delayed_otp_click(selector, timeout=None):
+            original_click(selector, timeout=timeout)
+            if selector == "#login input[name='_eventId_submit'][type='submit']":
+                page._state = "otp_form"
+                page.current_url = settings.cas_url
+                page._otp_form_visible = True
+
+        page.click = delayed_otp_click
+
+        # Keep stale CAS form visible until 19 sleep calls (1.9 seconds), then transition
+        original_sleep = clock.sleep
+        sleep_count = 0
+
+        def advancing_sleep(seconds):
+            nonlocal sleep_count
+            original_sleep(seconds)
+            sleep_count += 1
+            if sleep_count >= 19 and page._state == "otp_form":
+                page._state = "root_portal"
+                page.current_url = page._root_portal_url
+                page._otp_form_visible = False
+
+        clock.sleep = advancing_sleep
+
+        from cmp_auth import authenticate_cmp
+        result = authenticate_cmp(settings=settings, otp_provider=otp, page=page, clock=clock)
+
+        assert result is True
+        assert page.current_url == settings.cmp_products_url
+        assert sleep_count >= 19
+
+    def test_persistent_cas_form_at_or_beyond_2s_raises_exact_error(self, caplog):
+        """A persistent CAS form at 2.0s grace deadline raises exactly AuthenticationError('OTP rejected by portal or session expired') and fails fast."""
+        import logging
+        caplog.set_level(logging.DEBUG)
+        settings = make_test_settings(navigation_timeout_ms=60000)
+        page = FakePage()
+        otp = FakeOtpProvider()
+        clock = FakeClock(start_time=1000.0)
+
+        original_click = page.click
+        def persistent_rejection_click(selector, timeout=None):
+            original_click(selector, timeout=timeout)
+            if selector == "#login input[name='_eventId_submit'][type='submit']":
+                page._state = "otp_form"
+                page.current_url = settings.cas_url
+                page._otp_form_visible = True
+
+        page.click = persistent_rejection_click
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        with pytest.raises(AuthenticationError) as exc_info:
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page, clock=clock)
+
+        # Exact sanitized error message
+        assert str(exc_info.value) == "OTP rejected by portal or session expired"
+
+        # Bounded rejection check: elapsed sleep time is 2.0s (fails fast at 2.0s, far less than 60s timeout)
+        total_sleep = sum(clock.sleep_calls)
+        assert round(total_sleep, 1) == 2.0
+
+        # Safe diagnostics logged without sensitive data leakage
+        log_text = caplog.text
+        assert "route: CAS_LOGIN" in log_text
+        assert "username_visible" in log_text
+        assert "otp_visible" in log_text
+        assert "approved_root" in log_text
+        assert "approved_products" in log_text
+        assert settings.cmp_username.get_secret_value() not in log_text
+        assert settings.cmp_password.get_secret_value() not in log_text
+        assert "123456" not in log_text
+
+    def test_login_or_otp_form_visible_reused(self):
+        """Verify that _login_or_otp_form_visible utilizes _check_auth_form_visibility."""
+        from cmp_auth import _login_or_otp_form_visible, _check_auth_form_visibility
+        page = FakePage()
+        page._state = "cas"
+        assert _login_or_otp_form_visible(page) is True
+        assert _check_auth_form_visibility(page) == (True, False)
+
+    def test_persistent_cas_form_raises_sanitized_authentication_error(self, caplog):
+        """Persistent CAS login/OTP form across confirmation polls must raise sanitized AuthenticationError."""
+        import logging
+        caplog.set_level(logging.DEBUG)
+        settings = make_test_settings()
+        page = FakePage()
+        otp = FakeOtpProvider()
+        clock = FakeClock()
+
+        original_click = page.click
+        def persistent_rejection_click(selector, timeout=None):
+            original_click(selector, timeout=timeout)
+            if selector == "#login input[name='_eventId_submit'][type='submit']":
+                page._state = "otp_form"
+                page.current_url = settings.cas_url
+                page._otp_form_visible = True
+
+        page.click = persistent_rejection_click
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        with pytest.raises(AuthenticationError) as exc_info:
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page, clock=clock)
+
+        assert str(exc_info.value) == "OTP rejected by portal or session expired"
+
+        log_text = caplog.text
+        assert "route: CAS_LOGIN" in log_text
+        assert settings.cmp_password.get_secret_value() not in log_text
+        assert "123456" not in log_text
+
+    def test_no_sensitive_data_in_post_otp_diagnostics(self, caplog):
+        """Verify that post-OTP diagnostics contain route labels, counters, and booleans without sensitive data."""
+        import logging
+        caplog.set_level(logging.DEBUG)
+        settings = make_test_settings()
+        page = FakePage()
+        otp = FakeOtpProvider()
+        clock = FakeClock()
+
+        original_click = page.click
+        def persistent_rejection_click(selector, timeout=None):
+            original_click(selector, timeout=timeout)
+            if selector == "#login input[name='_eventId_submit'][type='submit']":
+                page._state = "otp_form"
+                page.current_url = settings.cas_url
+                page._otp_form_visible = True
+
+        page.click = persistent_rejection_click
+
+        from cmp_auth import authenticate_cmp, AuthenticationError
+        with pytest.raises(AuthenticationError):
+            authenticate_cmp(settings=settings, otp_provider=otp, page=page, clock=clock)
+
+        log_text = caplog.text
+        assert "username_visible" in log_text
+        assert "otp_visible" in log_text
+        assert "approved_root" in log_text
+        assert "approved_products" in log_text
+        assert "route: CAS_LOGIN" in log_text
+        assert settings.cmp_username.get_secret_value() not in log_text
+        assert settings.cmp_password.get_secret_value() not in log_text
 
     def test_otp_rejection_raises_sanitized_error(self):
         settings = make_test_settings(navigation_timeout_ms=100)

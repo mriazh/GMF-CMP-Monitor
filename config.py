@@ -72,6 +72,7 @@ class Settings:
     recovery_retry_limit: int
     recovery_backoff_seconds: int
     headless: bool
+    firefox_executable_path: Path | None
     runtime_artifact_dir: Path | None
     browser_storage_state_path: Path | None
     log_level: str
@@ -183,6 +184,19 @@ def _external_path(path: Path, setting: str) -> Path:
     raise ConfigError(f"{setting} must be outside the repository workspace")
 
 
+def _firefox_executable_path(values: Mapping[str, str]) -> Path | None:
+    configured = _optional(values, "FIREFOX_EXECUTABLE_PATH", "")
+    if not configured:
+        return None
+    path = Path(configured)
+    if not path.is_absolute():
+        raise ConfigError("FIREFOX_EXECUTABLE_PATH must be an absolute path")
+    path = path.resolve()
+    if not path.is_file():
+        raise ConfigError("FIREFOX_EXECUTABLE_PATH must be an existing regular file")
+    return _external_path(path, "FIREFOX_EXECUTABLE_PATH")
+
+
 def _artifact_dir(values: Mapping[str, str]) -> Path:
     configured = _optional(values, "RUNTIME_ARTIFACT_DIR", "")
     path = (
@@ -254,6 +268,7 @@ def load_settings(
     if storage_state:
         path = _external_path(Path(storage_state), "BROWSER_STORAGE_STATE_PATH")
         storage_state_path = path
+    firefox_executable_path = _firefox_executable_path(values)
 
     log_level = _optional(values, "LOG_LEVEL", "INFO").upper()
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
@@ -292,6 +307,7 @@ def load_settings(
         recovery_retry_limit=_positive_int(values, "RECOVERY_RETRY_LIMIT", 3),
         recovery_backoff_seconds=_positive_int(values, "RECOVERY_BACKOFF_SECONDS", 5),
         headless=_boolean(values, "HEADLESS", False),
+        firefox_executable_path=firefox_executable_path,
         runtime_artifact_dir=_artifact_dir(values),
         browser_storage_state_path=storage_state_path,
         log_level=log_level,

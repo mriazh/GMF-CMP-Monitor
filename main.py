@@ -8,15 +8,21 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 from playwright.sync_api import sync_playwright
 
-from config import load_settings, ConfigError
+from cmp_auth import AuthenticationError, authenticate_cmp
+from config import ConfigError, load_settings
+from dashboard_monitor import (
+    ContinuousMonitor,
+    RecoveryError,
+    RecoveryExhaustedError,
+    navigate_to_dashboard,
+)
 from imap_client import ImapClient, SystemClock
-from cmp_auth import authenticate_cmp, AuthenticationError
-from dashboard_monitor import ContinuousMonitor, DashboardState, RecoveryError, RecoveryExhaustedError, navigate_to_dashboard
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +39,6 @@ def setup_logging(level: str, log_file: str = "monitor.log") -> None:
 
 def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = None) -> int:
     """Main entry point. Does not launch browser during module import."""
-    # 1. Load configuration
     try:
         settings = load_settings(env=env, env_file=env_file)
     except ConfigError as exc:
@@ -51,33 +56,41 @@ def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = Non
     page = None
 
     try:
-        # 2. Create IMAP client (object only; connect right before authentication)
         clock = SystemClock()
         imap_client = ImapClient(settings, clock)
 
-        # 3. Launch Firefox browser
         playwright = sync_playwright().start()
-        browser = playwright.firefox.launch(headless=settings.headless)
+        launch_kwargs = {"headless": settings.headless}
+        if settings.firefox_executable_path:
+            launch_kwargs["executable_path"] = str(settings.firefox_executable_path.resolve())
+        browser = playwright.firefox.launch(**launch_kwargs)
         context = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = context.new_page()
         log.info("Firefox launched (headless=%s, viewport=1920x1080)", settings.headless)
 
-        # 4. Connect IMAP right before authentication to minimize idle time
         log.info("Connecting to IMAP...")
         imap_client.connect()
         log.info("IMAP connected")
 
-        # 5. Authenticate
         authenticate_cmp(settings=settings, otp_provider=imap_client, page=page, clock=clock)
         log.info("Authentication successful")
 
-        # 6. Navigate to dashboard via the real SPA menu click (never a direct
-        #    goto to #!dashboard: a direct navigation changes the URL without
-        #    rendering the dashboard view).
-        navigate_to_dashboard(page, settings)
-        log.info("Navigated to dashboard")
+        for attempt in range(1, settings.recovery_retry_limit + 1):
+            try:
+                navigate_to_dashboard(page, settings)
+                log.info("Navigated to dashboard")
+                break
+            except RecoveryError:
+                log.warning(
+                    "Startup dashboard navigation attempt %d/%d failed",
+                    attempt,
+                    settings.recovery_retry_limit,
+                )
+                if attempt >= settings.recovery_retry_limit:
+                    log.error("Startup dashboard navigation recovery exhausted")
+                    return 1
+                time.sleep(settings.recovery_backoff_seconds)
 
-        # 6. Monitor
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=imap_client, clock=clock)
 
         while True:
@@ -86,9 +99,8 @@ def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = Non
 
                 if need_relogin:
                     log.info("Re-authentication performed")
-                    # monitor_once already handles relogin and navigation to dashboard
-            except RecoveryExhaustedError as exc:
-                log.error("Recovery exhausted: %s", exc)
+            except RecoveryExhaustedError:
+                log.error("Recovery exhausted during monitoring")
                 return 1
             except AuthenticationError:
                 log.error("Authentication error during monitoring")
@@ -100,7 +112,7 @@ def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = Non
     except KeyboardInterrupt:
         log.info("Shutting down via keyboard interrupt")
         return 0
-    except AuthenticationError as exc:
+    except AuthenticationError:
         log.error("Authentication failed")
         return 1
     except RecoveryExhaustedError:
@@ -109,48 +121,42 @@ def main(env_file: str | Path | None = None, env: Mapping[str, str] | None = Non
     except RecoveryError:
         log.error("Dashboard recovery failed")
         return 1
-    except Exception:
+    except Exception:  # noqa: BLE001
         log.error("Monitor failed")
         return 1
     finally:
-        # Cleanup all resources in reverse order of creation
         log.info("Cleaning up resources...")
-        
-        # Close page
+
         if page is not None:
             try:
                 page.close()
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt):  # noqa: BLE001, S110
                 pass
 
-        # Close context
         if context is not None:
             try:
                 context.close()
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt):  # noqa: BLE001, S110
                 pass
 
-        # Close browser
         if browser is not None:
             try:
                 browser.close()
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt):  # noqa: BLE001, S110
                 pass
 
-        # Stop playwright
         if playwright is not None:
             try:
                 playwright.stop()
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt):  # noqa: BLE001, S110
                 pass
-        
-        # Disconnect IMAP
+
         if imap_client is not None:
             try:
                 imap_client.disconnect()
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt):  # noqa: BLE001, S110
                 pass
-        
+
     return 0
 
 

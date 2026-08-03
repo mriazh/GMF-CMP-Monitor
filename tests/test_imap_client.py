@@ -52,6 +52,7 @@ def make_test_settings(**overrides) -> Settings:
         "recovery_retry_limit": 3,
         "recovery_backoff_seconds": 5,
         "headless": False,
+        "firefox_executable_path": None,
         "runtime_artifact_dir": None,
         "browser_storage_state_path": None,
         "log_level": "INFO",

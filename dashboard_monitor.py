@@ -299,6 +299,9 @@ def _visible_dashboard_menu(page: object) -> object | None:
 # Maximum allowed SPA bootstrap/load time before Dashboard menu polling begins.
 # The Vaadin 7 shell may take up to ~90s to fully load after domcontentloaded.
 VAADIN_BOOTSTRAP_TIMEOUT_SECONDS = 150.0
+# A completed route bounce gets a fresh bounded navigation attempt, but a
+# persistently unstable SPA must not be retried forever inside one call.
+MAX_DASHBOARD_MENU_ATTEMPTS = 3
 
 
 def _is_playwright_page(page: object) -> bool:
@@ -328,14 +331,17 @@ def _wait_for_vaadin_loading(page: object, clock: Clock, timeout_seconds: float)
     log.info(
         "Waiting up to %.0fs for Vaadin SPA menu to load", timeout_seconds
     )
-    deadline = clock.now() + timeout_seconds
+    start_time = clock.now()
+    deadline = start_time + timeout_seconds
     while clock.now() < deadline:
         if _visible_dashboard_menu(page) is not None:
-            log.info("Vaadin SPA menu became visible")
+            elapsed = clock.now() - start_time
+            log.info("Vaadin SPA menu became visible after %.1fs", elapsed)
             return
         clock.sleep(POLL_INTERVAL_SECONDS)
+    elapsed = clock.now() - start_time
     log.error(
-        "Vaadin SPA menu never became visible after %.0fs", timeout_seconds
+        "Vaadin SPA menu never became visible after %.1fs (timeout: %.0fs)", elapsed, timeout_seconds
     )
     raise RecoveryError(
         "Dashboard navigation failed: Vaadin SPA menu never became visible"
@@ -361,9 +367,12 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
     # render the menu items. Poll for the menu to appear (or the v-app-loading
     # indicator to disappear) before starting the main navigation deadline.
     _wait_for_vaadin_loading(page, clock, VAADIN_BOOTSTRAP_TIMEOUT_SECONDS)
-    deadline = clock.now() + (settings.navigation_timeout_ms / 1000.0)
+    navigation_timeout_seconds = settings.navigation_timeout_ms / 1000.0
+    deadline = clock.now() + navigation_timeout_seconds
     clicked = False
     left_products_seen = False
+    menu_attempts = 0
+    click_failed = False
     verified_polls = 0
     # Throttled diagnostics for post-click unverified Dashboard state
     last_diag_time = None
@@ -374,7 +383,7 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
             raise AuthenticationRequiredError(
                 "Authentication required during dashboard navigation"
             )
-        if _is_verified_dashboard(page):
+        if not click_failed and _is_verified_dashboard(page):
             verified_polls += 1
             if verified_polls >= VERIFIED_DASHBOARD_POLLS:
                 log.info("Dashboard verified (URL, hash, DOM)")
@@ -401,8 +410,15 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
                     # Confirmed bounce: exactly one retry per observed round-trip.
                     # Reset ``clicked`` so the next poll attempts the real menu
                     # click again (the route left Products and returned).
+                    if menu_attempts >= MAX_DASHBOARD_MENU_ATTEMPTS:
+                        log.warning(
+                            "Dashboard menu navigation bounced %d times; stopping bounded retries",
+                            menu_attempts,
+                        )
+                        break
                     left_products_seen = False
                     clicked = False
+                    deadline = clock.now() + navigation_timeout_seconds
                     log.info("Confirmed bounce back to products; retrying Dashboard menu click")
             # Post-click verification pending: emit throttled diagnostics for
             # every route state (Products, unknown, or unverified Dashboard
@@ -428,10 +444,17 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
 
         log.info("Clicking SPA Dashboard menu item")
         try:
-            menu.click()
+            remaining_timeout_ms = max(1, int((deadline - clock.now()) * 1000))
+            # The Vaadin click may update the SPA route asynchronously. Do not
+            # make Playwright wait for a navigation that has no load event;
+            # the bounded verification loop below owns the route deadline.
+            menu.click(timeout=remaining_timeout_ms, no_wait_after=True)
+            menu_attempts += 1
             clicked = True
+            click_failed = False
             left_products_seen = False
         except Exception:
+            click_failed = True
             log.debug("Dashboard menu click failed; will retry")
         clock.sleep(POLL_INTERVAL_SECONDS)
     # Final diagnostic before timeout
@@ -462,8 +485,10 @@ def navigate_to_dashboard(
         raise AuthenticationRequiredError(
             "Authentication required during dashboard navigation"
         )
-    if state == DashboardState.UNKNOWN:
-        log.info("Unknown state; navigating to products to load the SPA shell")
+    if state == DashboardState.UNKNOWN or (
+        state == DashboardState.DASHBOARD and not _is_verified_dashboard(page)
+    ):
+        log.info("Unverified dashboard or unknown state; navigating to products to load the SPA shell")
         try:
             page.goto(
                 settings.cmp_products_url,
@@ -497,35 +522,58 @@ class ContinuousMonitor:
 
         Returns True if recovery succeeded.
         Raises RecoveryExhaustedError if limit is reached.
-        Raises RecoveryError for navigation failures.
         """
-        self._consecutive_recoveries += 1
-        self._check_recovery_limit()
+        while True:
+            self._check_recovery_limit()
+            self._consecutive_recoveries += 1
 
-        # Wait for backoff before recovery attempt
-        backoff = self._settings.recovery_backoff_seconds
-        log.info("Waiting %.0fs before recovery attempt (%d/%d)",
-                 backoff, self._consecutive_recoveries, self._settings.recovery_retry_limit)
-        self._clock.sleep(backoff)
+            # Wait for backoff before each bounded recovery attempt.
+            backoff = self._settings.recovery_backoff_seconds
+            log.info("Waiting %.0fs before recovery attempt (%d/%d)",
+                     backoff, self._consecutive_recoveries, self._settings.recovery_retry_limit)
+            self._clock.sleep(backoff)
 
-        # Try to navigate back to dashboard via the real SPA menu click
-        try:
-            navigate_to_dashboard(self._page, self._settings, self._clock)
-        except RecoveryError:
-            # Navigation failed, counter retained, will be checked on next cycle
-            raise
-        except Exception as nav_exc:
-            log.error("Navigation to dashboard failed during recovery: %s", type(nav_exc).__name__)
-            raise RecoveryError("Dashboard recovery failed") from nav_exc
+            # Try to navigate back to dashboard via the real SPA menu click.
+            try:
+                navigate_to_dashboard(self._page, self._settings, self._clock)
+            except AuthenticationRequiredError:
+                # Preserve the normal relogin path for session expiry during
+                # a recovery navigation.
+                raise
+            except RecoveryError:
+                # A failed attempt must not escape to main.py before the
+                # configured recovery limit has been consumed.
+                if self._consecutive_recoveries >= self._settings.recovery_retry_limit:
+                    log.error(
+                        "Recovery limit (%d) reached after failed navigation",
+                        self._settings.recovery_retry_limit,
+                    )
+                    raise RecoveryExhaustedError(
+                        f"Maximum recovery attempts ({self._settings.recovery_retry_limit}) exceeded"
+                    ) from None
+                log.warning("Dashboard recovery attempt failed; retrying within configured limit")
+                continue
+            except Exception as nav_exc:
+                log.error("Navigation to dashboard failed during recovery: %s", type(nav_exc).__name__)
+                if self._consecutive_recoveries >= self._settings.recovery_retry_limit:
+                    log.error(
+                        "Recovery limit (%d) reached after failed navigation",
+                        self._settings.recovery_retry_limit,
+                    )
+                    raise RecoveryExhaustedError(
+                        f"Maximum recovery attempts ({self._settings.recovery_retry_limit}) exceeded"
+                    ) from None
+                continue
 
-        # Successfully recovered to dashboard
-        self._consecutive_recoveries = 0
-        return True
+            # Successfully recovered to dashboard.
+            self._consecutive_recoveries = 0
+            log.info("Dashboard recovery completed")
+            return True
 
     def monitor_once(self) -> bool:
         """Execute one monitoring cycle.
 
-        Returns True if re-authentication was performed and succeeded, False otherwise.
+        Returns True if recovery or re-authentication was performed and succeeded, False otherwise.
         Raises RecoveryExhaustedError if recovery limit is reached.
         Raises RecoveryError for recovery navigation failures.
         """
@@ -807,14 +855,24 @@ class ContinuousMonitor:
 
     def _relogin_and_navigate(self) -> bool:
         """Re-authenticate and navigate to the verified dashboard."""
-        try:
-            self._perform_relogin()
-        except (RecoveryError, AuthenticationRequiredError):
-            log.error("Relogin navigation failed; starting bounded recovery")
-            return self._recover_to_dashboard()
-        # Only reset the counter after a verified dashboard state.
-        self._consecutive_recoveries = 0
-        return True
+        while True:
+            self._check_recovery_limit()
+            try:
+                self._perform_relogin()
+                self._consecutive_recoveries = 0
+                return True
+            except (AuthenticationError, AuthenticationRequiredError, RecoveryError) as exc:
+                log.error("Re-authentication attempt failed: %s", type(exc).__name__)
+                self._consecutive_recoveries += 1
+                self._check_recovery_limit()
+                backoff = self._settings.recovery_backoff_seconds
+                log.info(
+                    "Waiting %.0fs before re-authentication attempt (%d/%d)",
+                    backoff,
+                    self._consecutive_recoveries,
+                    self._settings.recovery_retry_limit,
+                )
+                self._clock.sleep(backoff)
 
     def _check_recovery_limit(self) -> None:
         """Check if recovery limit has been exceeded."""

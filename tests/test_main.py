@@ -54,6 +54,7 @@ def make_test_settings() -> Settings:
         recovery_retry_limit=3,
         recovery_backoff_seconds=5,
         headless=False,
+        firefox_executable_path=None,
         runtime_artifact_dir=None,
         browser_storage_state_path=None,
         log_level="INFO",
@@ -117,12 +118,39 @@ class TestFirefoxOnly:
                         main.main(env=TEST_ENV)
 
                         # Verify Firefox was launched
-                        mock_playwright.firefox.launch.assert_called_once()
+                        mock_playwright.firefox.launch.assert_called_once_with(headless=False)
                         # Verify browser context was created with 1920x1080 viewport
+
                         mock_browser.new_context.assert_called_once_with(viewport={"width": 1920, "height": 1080})
                         # Verify Chromium/Chrome/WebKit were NOT called
                         assert not mock_playwright.chromium.launch.called
                         assert not mock_playwright.webkit.launch.called
+
+
+class TestInstalledFirefoxExecutable:
+    @patch("main.navigate_to_dashboard")
+    def test_configured_executable_path_is_passed_to_firefox(self, mock_navigate, tmp_path):
+        executable = tmp_path / "firefox.exe"
+        executable.write_text("test executable")
+        env = dict(TEST_ENV)
+        env["FIREFOX_EXECUTABLE_PATH"] = str(executable)
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+            with patch("main.ImapClient") as mock_imap_class, patch("main.authenticate_cmp"), patch("main.ContinuousMonitor") as monitor_class:
+                mock_imap_class.return_value = MagicMock()
+                monitor_class.return_value.monitor_once.side_effect = KeyboardInterrupt()
+                import main
+                main.main(env=env)
+        mock_playwright.firefox.launch.assert_called_once_with(
+            headless=False, executable_path=str(executable.resolve())
+        )
 
 
 class TestPlaywrightStopInvoked:
@@ -336,3 +364,106 @@ class TestAuthenticationErrorReturnsError:
                     result = main.main(env=TEST_ENV)
 
                     assert result == 1
+
+
+
+class TestStartupDashboardNavigationRecovery:
+    @patch("main.time.sleep")
+    @patch("main.navigate_to_dashboard")
+    def test_startup_navigation_recovers_after_retry(self, mock_navigate, mock_sleep):
+        from dashboard_monitor import RecoveryError
+
+        mock_navigate.side_effect = [RecoveryError("Temporary navigation error"), None]
+
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap = MagicMock()
+                mock_imap_class.return_value = mock_imap
+
+                with patch("main.authenticate_cmp"):
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        mock_monitor = MagicMock()
+                        mock_monitor.monitor_once.side_effect = KeyboardInterrupt()
+                        mock_monitor_class.return_value = mock_monitor
+
+                        import main
+                        result = main.main(env=TEST_ENV)
+
+                        assert result == 0
+                        assert mock_navigate.call_count == 2
+                        mock_sleep.assert_called_once_with(5)
+                        mock_monitor_class.assert_called_once()
+
+    @patch("main.time.sleep")
+    @patch("main.navigate_to_dashboard")
+    def test_startup_navigation_exhausts_retries_returns_error(self, mock_navigate, mock_sleep):
+        from dashboard_monitor import RecoveryError
+
+        mock_navigate.side_effect = RecoveryError("Persistent navigation error")
+
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap = MagicMock()
+                mock_imap_class.return_value = mock_imap
+
+                with patch("main.authenticate_cmp"):
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        import main
+                        result = main.main(env=TEST_ENV)
+
+                        assert result == 1
+                        assert mock_navigate.call_count == 3
+                        assert mock_sleep.call_count == 2
+                        mock_monitor_class.assert_not_called()
+
+    @patch("main.time.sleep")
+    @patch("main.navigate_to_dashboard")
+    def test_authentication_error_not_retried(self, mock_navigate, mock_sleep):
+        from cmp_auth import AuthenticationError
+
+        mock_navigate.side_effect = AuthenticationError("Auth error in nav")
+
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap = MagicMock()
+                mock_imap_class.return_value = mock_imap
+
+                with patch("main.authenticate_cmp"):
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        import main
+                        result = main.main(env=TEST_ENV)
+
+                        assert result == 1
+                        assert mock_navigate.call_count == 1
+                        mock_sleep.assert_not_called()
+                        mock_monitor_class.assert_not_called()

@@ -24,7 +24,10 @@ def test_live_login_to_dashboard():
     browser = None
     try:
         with sync_playwright() as playwright:
-            browser = playwright.firefox.launch(headless=settings.headless)
+            launch_options: dict[str, bool | str] = {"headless": settings.headless}
+            if settings.firefox_executable_path is not None:
+                launch_options["executable_path"] = str(settings.firefox_executable_path)
+            browser = playwright.firefox.launch(**launch_options)
             context = browser.new_context(viewport={"width": 1920, "height": 1080})
             page = context.new_page()
 

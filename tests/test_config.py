@@ -434,6 +434,98 @@ class TestBrowserSettings:
         settings = load_settings(env=env)
         assert settings.headless is True
 
+    def test_firefox_executable_path_unset(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+        }
+        settings = load_settings(env=env)
+        assert settings.firefox_executable_path is None
+
+    def test_firefox_executable_path_accepts_existing_external_file(self, tmp_path):
+        executable = tmp_path / "firefox.exe"
+        executable.write_text("test executable")
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "FIREFOX_EXECUTABLE_PATH": str(executable),
+        }
+        settings = load_settings(env=env)
+        assert settings.firefox_executable_path == executable.resolve()
+
+    @pytest.mark.parametrize(
+        "path_value, error",
+        [
+            ("firefox.exe", "absolute path"),
+            ("C:/missing/firefox.exe", "existing regular file"),
+        ],
+    )
+    def test_firefox_executable_path_rejects_invalid_path(self, path_value, error):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "FIREFOX_EXECUTABLE_PATH": path_value,
+        }
+        with pytest.raises(ConfigError, match=error):
+            load_settings(env=env)
+
+    def test_firefox_executable_path_rejects_empty_value(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "FIREFOX_EXECUTABLE_PATH": "   ",
+        }
+        settings = load_settings(env=env)
+        assert settings.firefox_executable_path is None
+
+    def test_firefox_executable_path_rejects_directory(self, tmp_path):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "FIREFOX_EXECUTABLE_PATH": str(tmp_path),
+        }
+        with pytest.raises(ConfigError, match="existing regular file"):
+            load_settings(env=env)
+
+    def test_firefox_executable_path_rejects_repository_file(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "FIREFOX_EXECUTABLE_PATH": str(PROJECT_ROOT / "config.py"),
+        }
+        with pytest.raises(ConfigError, match="outside the repository workspace"):
+            load_settings(env=env)
+
 
 class TestRuntimeSettings:
     def test_runtime_artifact_dir(self):

@@ -160,6 +160,7 @@ INITIAL_SUBMIT_VISIBLE_SELECTOR = "#fm1 input[name='submit']"
 USERNAME_SELECTOR = "#username"
 PASSWORD_SELECTOR = "#password"
 TOKEN_SELECTOR = "#token"
+POST_OTP_REJECTION_GRACE_SECONDS = 2.0
 
 
 def _wait_for_initial_submit_enabled(page: object, settings: Settings) -> None:
@@ -258,6 +259,53 @@ def _bounded_wait_for_auth_form_or_redirect(
     raise AuthenticationError("Timed out waiting for login form or portal redirect")
 
 
+def _check_post_otp_rejection(
+    page: object,
+    url: str,
+    start_time: float,
+    grace_deadline: float,
+    consecutive_rejections: int,
+    clock: Clock,
+    approved_root: bool = False,
+    approved_products: bool = False,
+) -> int:
+    """Check post-OTP rejection status and log safe diagnostics.
+
+    Increments and returns consecutive_rejections count if form is visible.
+    Raises AuthenticationError("OTP rejected by portal or session expired") if grace_deadline is exceeded.
+    Returns 0 if no auth form is visible.
+    """
+    username_visible, otp_visible = _check_auth_form_visibility(page)
+    if username_visible or otp_visible:
+        consecutive_rejections += 1
+        elapsed = clock.now() - start_time
+        route_label = _classify_route_label(url, page)
+        log.debug(
+            "Post-OTP rejection poll %d (route: %s, elapsed: %.1fs, username_visible: %s, otp_visible: %s, approved_root: %s, approved_products: %s)",
+            consecutive_rejections,
+            route_label,
+            elapsed,
+            username_visible,
+            otp_visible,
+            approved_root,
+            approved_products,
+        )
+        if clock.now() >= grace_deadline:
+            log.error(
+                "OTP rejected or session expired after %d consecutive polls (route: %s, elapsed: %.1fs, username_visible: %s, otp_visible: %s, approved_root: %s, approved_products: %s)",
+                consecutive_rejections,
+                route_label,
+                elapsed,
+                username_visible,
+                otp_visible,
+                approved_root,
+                approved_products,
+            )
+            raise AuthenticationError("OTP rejected by portal or session expired")
+        return consecutive_rejections
+    return 0
+
+
 def _wait_for_products_page(
     page: object, settings: Settings, clock: Clock, post_otp: bool = False
 ) -> None:
@@ -267,70 +315,133 @@ def _wait_for_products_page(
     which is a valid post-login state. We then explicitly navigate to the products page.
 
     When ``post_otp`` is True the page must transition AWAY from the CAS login/OTP
-    forms. If CAS instead shows the login or OTP form again (the submitted OTP was
-    rejected or the session expired), raise an accurate, sanitized AuthenticationError
-    immediately instead of spinning until the generic navigation timeout. This avoids
-    masking an OTP rejection as a misleading "portal timed out" error.
+    forms. If CAS instead shows the login or OTP form again after the bounded grace
+    period (the submitted OTP was rejected or the session expired), raise an accurate,
+    sanitized AuthenticationError. Stale form observations on early polls during
+    asynchronous navigation are given a bounded grace confirmation period (2.0s)
+    before declaring rejection.
     """
-    deadline = clock.now() + (settings.navigation_timeout_ms / 1000.0)
+    start_time = clock.now()
+    deadline = start_time + (settings.navigation_timeout_ms / 1000.0)
+    grace_deadline = start_time + POST_OTP_REJECTION_GRACE_SECONDS
+    consecutive_rejections = 0
 
     # First, wait for either root portal or products page (both indicate successful login)
     while clock.now() < deadline:
         try:
-            url = page.url
-            if url:
-                parsed = urlparse(url)
-                if _is_products_page(url) or _is_root_portal(url):
-                    break
-                if post_otp and _login_or_otp_form_visible(page):
-                    raise AuthenticationError("OTP rejected by portal or session expired")
+            url = getattr(page, "url", "") or ""
+            approved_root = _is_root_portal(url)
+            approved_products = _is_products_page(url)
+
             # Also check fragment via JavaScript (Vaadin may update hash before page.url)
-            try:
-                fragment = page.evaluate("window.location.hash")
-                href = page.evaluate("window.location.href")
-                if fragment == "#!products" and _is_approved_products_href(href):
-                    break
-            except Exception:
-                pass
+            if not approved_products and not approved_root:
+                try:
+                    fragment = page.evaluate("window.location.hash")
+                    href = page.evaluate("window.location.href")
+                    if fragment == "#!products" and _is_approved_products_href(href):
+                        approved_products = True
+                except Exception:
+                    pass
+
+            if approved_products or approved_root:
+                route_label = "PRODUCTS" if approved_products else "ROOT"
+                elapsed = clock.now() - start_time
+                log.info(
+                    "Post-login target reached (route: %s, elapsed: %.1fs)",
+                    route_label,
+                    elapsed,
+                )
+                break
+
+            if post_otp:
+                consecutive_rejections = _check_post_otp_rejection(
+                    page, url, start_time, grace_deadline, consecutive_rejections, clock, approved_root, approved_products
+                )
         except AuthenticationError:
             raise
         except Exception:
             pass
         clock.sleep(0.1)
     else:
+        if post_otp and consecutive_rejections >= 1:
+            url = getattr(page, "url", "") or ""
+            username_visible, otp_visible = _check_auth_form_visibility(page)
+            if username_visible or otp_visible:
+                log.error(
+                    "OTP rejected or session expired at deadline (route: %s, elapsed: %.1fs)",
+                    _classify_route_label(url, page),
+                    clock.now() - start_time,
+                )
+                raise AuthenticationError("OTP rejected by portal or session expired")
         raise AuthenticationError("Navigation to portal timed out")
 
     # If we landed on root portal, explicitly navigate to products page
     if _is_root_portal(page.url):
         log.info("Landed on root portal, navigating to products page")
+        phase2_start_time = clock.now()
         page.goto(
             settings.cmp_products_url,
             timeout=settings.navigation_timeout_ms,
             wait_until="domcontentloaded",
         )
         # Wait for products page fragment
-        deadline = clock.now() + (settings.navigation_timeout_ms / 1000.0)
+        deadline = phase2_start_time + (settings.navigation_timeout_ms / 1000.0)
+        phase2_grace_deadline = phase2_start_time + POST_OTP_REJECTION_GRACE_SECONDS
+        consecutive_rejections = 0
         while clock.now() < deadline:
             try:
-                url = page.url
-                if url and _is_products_page(url):
+                url = getattr(page, "url", "") or ""
+                approved_products = _is_products_page(url)
+                if not approved_products:
+                    try:
+                        fragment = page.evaluate("window.location.hash")
+                        href = page.evaluate("window.location.href")
+                        if fragment == "#!products" and _is_approved_products_href(href):
+                            approved_products = True
+                    except Exception:
+                        pass
+
+                if approved_products:
                     return
-                if post_otp and _login_or_otp_form_visible(page):
-                    raise AuthenticationError("OTP rejected by portal or session expired")
-                # Also check fragment via JavaScript
-                try:
-                    fragment = page.evaluate("window.location.hash")
-                    href = page.evaluate("window.location.href")
-                    if fragment == "#!products" and _is_approved_products_href(href):
-                        return
-                except Exception:
-                    pass
+
+                if post_otp:
+                    consecutive_rejections = _check_post_otp_rejection(
+                        page, url, phase2_start_time, phase2_grace_deadline, consecutive_rejections, clock, False, approved_products
+                    )
             except AuthenticationError:
                 raise
             except Exception:
                 pass
             clock.sleep(0.1)
         raise AuthenticationError("Navigation to products page timed out after portal")
+
+
+def _classify_route_label(url: str, page: object = None) -> str:
+    """Return safe route label without sensitive URL details."""
+    if not url:
+        return "UNKNOWN"
+    try:
+        parsed = urlparse(url)
+        if _is_approved_origin(parsed):
+            if parsed.fragment == "!products":
+                return "PRODUCTS"
+            if parsed.path in ("", "/"):
+                return "ROOT"
+            if parsed.path.startswith("/cas/login"):
+                return "CAS_LOGIN"
+    except Exception:
+        pass
+
+    if page is not None:
+        try:
+            fragment = page.evaluate("window.location.hash")
+            href = page.evaluate("window.location.href")
+            if fragment == "#!products" and _is_approved_products_href(href):
+                return "PRODUCTS"
+        except Exception:
+            pass
+
+    return "UNKNOWN"
 
 
 def _is_approved_origin(parsed: ParseResult) -> bool:
@@ -405,6 +516,23 @@ def _is_cas_login_url(url: str) -> bool:
         return False
 
 
+def _check_auth_form_visibility(page: object) -> tuple[bool, bool]:
+    """Check if username or OTP forms are currently visible.
+
+    Returns (username_visible, otp_visible).
+    """
+    username_visible = False
+    otp_visible = False
+    try:
+        if hasattr(page, "is_visible"):
+            url = getattr(page, "url", "") or ""
+            username_visible = page.is_visible(USERNAME_SELECTOR)
+            otp_visible = _is_cas_login_url(url) and page.is_visible(TOKEN_SELECTOR)
+    except Exception:
+        pass
+    return username_visible, otp_visible
+
+
 def _login_or_otp_form_visible(page: object) -> bool:
     """Return True if the portal is showing the CAS login / OTP form again.
 
@@ -416,14 +544,5 @@ def _login_or_otp_form_visible(page: object) -> bool:
     field's visibility flag set after navigation; only a return to the login page
     is a reliable rejection signal.
     """
-    try:
-        if hasattr(page, "is_visible"):
-            url = getattr(page, "url", "") or ""
-            on_cas_login = _is_cas_login_url(url)
-            if page.is_visible(USERNAME_SELECTOR):
-                return True
-            if on_cas_login and page.is_visible(TOKEN_SELECTOR):
-                return True
-    except Exception:
-        pass
-    return False
+    username_visible, otp_visible = _check_auth_form_visibility(page)
+    return username_visible or otp_visible
