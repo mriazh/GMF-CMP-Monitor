@@ -23,5 +23,9 @@ artifacts/
 runtime_artifacts/
 *.log
 
+# Private operational planning
+/docs/PRD.md
+/PRD.md
+
 # Local agent handoff context
 CONTEXT.md

@@ -1,10 +1,9 @@
 """Tests for main entry point - all offline."""
 
 import importlib
-import sys
 from unittest.mock import MagicMock, patch
 
-from config import Settings, SecretValue
+from config import SecretValue, Settings
 
 # Complete, valid environment used to run main() offline. All secrets are
 # test-only placeholders; nothing here touches production systems.
@@ -467,3 +466,253 @@ class TestStartupDashboardNavigationRecovery:
                         assert mock_navigate.call_count == 1
                         mock_sleep.assert_not_called()
                         mock_monitor_class.assert_not_called()
+
+
+class TestLoggingSetup:
+    def test_timestamped_default_log_filename(self, tmp_path, monkeypatch):
+        import logging
+        import re
+        from main import setup_logging
+
+        monkeypatch.chdir(tmp_path)
+        setup_logging("INFO", log_file=None)
+
+        root = logging.getLogger()
+        file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+        assert len(file_handlers) >= 1
+
+        created_files = list(tmp_path.glob("monitor_*.log"))
+        assert len(created_files) == 1
+        assert re.match(r"^monitor_\d{8}_\d{6}\.log$", created_files[0].name)
+
+        for h in list(root.handlers):
+            if getattr(h, "_cmp_owned", False):
+                root.removeHandler(h)
+                h.close()
+
+    def test_explicit_log_path(self, tmp_path):
+        import logging
+        from main import setup_logging
+
+        explicit_path = tmp_path / "custom_logs" / "test_run.log"
+        setup_logging("DEBUG", log_file=explicit_path)
+
+        assert explicit_path.parent.exists()
+        assert explicit_path.exists()
+
+        root = logging.getLogger()
+        for h in list(root.handlers):
+            if getattr(h, "_cmp_owned", False):
+                root.removeHandler(h)
+                h.close()
+
+    def test_formatter_includes_readable_date_and_time(self, tmp_path):
+        import logging
+        import re
+
+        from main import setup_logging
+
+        explicit_path = tmp_path / "timestamp.log"
+        setup_logging("INFO", log_file=explicit_path)
+        logging.getLogger("test").info("timestamp check")
+
+        output = explicit_path.read_text(encoding="utf-8")
+        assert re.search(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] INFO:test: timestamp check$", output.strip())
+
+        root = logging.getLogger()
+        for h in list(root.handlers):
+            if getattr(h, "_cmp_owned", False):
+                root.removeHandler(h)
+                h.close()
+
+    def test_main_handled_failure_writes_single_start_and_end_without_exception_text(self, tmp_path):
+        import logging
+
+        import main
+
+        log_path = tmp_path / "handled-failure.log"
+        real_setup_logging = main.setup_logging
+
+        def configure_logging(level):
+            real_setup_logging(level, log_file=log_path)
+
+        with patch("main.setup_logging", side_effect=configure_logging):
+            with patch("main.sync_playwright") as mock_sync:
+                mock_playwright = MagicMock()
+                mock_browser = MagicMock()
+                mock_context = MagicMock()
+                mock_page = MagicMock()
+                mock_sync.return_value.start.return_value = mock_playwright
+                mock_playwright.firefox.launch.return_value = mock_browser
+                mock_browser.new_context.return_value = mock_context
+                mock_context.new_page.return_value = mock_page
+
+                with patch("main.ImapClient") as mock_imap_class:
+                    mock_imap_class.return_value = MagicMock()
+                    with patch(
+                        "main.authenticate_cmp",
+                        side_effect=main.AuthenticationError("sensitive_token_abc123"),
+                    ):
+                        assert main.main(env=TEST_ENV) == 1
+
+        output = log_path.read_text(encoding="utf-8")
+        assert output.count("==================== START CMP Dashboard Monitor ====================") == 1
+        assert output.count("==================== END CMP Dashboard Monitor ====================") == 1
+        assert "sensitive_token_abc123" not in output
+
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            if getattr(handler, "_cmp_owned", False):
+                root.removeHandler(handler)
+                handler.close()
+
+    def test_main_keyboard_interrupt_writes_single_start_and_end(self, tmp_path):
+        import logging
+
+        import main
+
+        log_path = tmp_path / "keyboard-interrupt.log"
+        real_setup_logging = main.setup_logging
+
+        def configure_logging(level):
+            real_setup_logging(level, log_file=log_path)
+
+        with patch("main.setup_logging", side_effect=configure_logging):
+            with patch("main.sync_playwright") as mock_sync:
+                mock_playwright = MagicMock()
+                mock_browser = MagicMock()
+                mock_context = MagicMock()
+                mock_page = MagicMock()
+                mock_sync.return_value.start.return_value = mock_playwright
+                mock_playwright.firefox.launch.return_value = mock_browser
+                mock_browser.new_context.return_value = mock_context
+                mock_context.new_page.return_value = mock_page
+
+                with patch("main.ImapClient") as mock_imap_class:
+                    mock_imap_class.return_value = MagicMock()
+                    with patch("main.authenticate_cmp"):
+                        with patch("main.navigate_to_dashboard"):
+                            with patch("main.ContinuousMonitor") as mock_monitor_class:
+                                mock_monitor_class.return_value.monitor_once.side_effect = KeyboardInterrupt()
+                                assert main.main(env=TEST_ENV) == 0
+
+        output = log_path.read_text(encoding="utf-8")
+        assert output.count("==================== START CMP Dashboard Monitor ====================") == 1
+        assert output.count("==================== END CMP Dashboard Monitor ====================") == 1
+
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            if getattr(handler, "_cmp_owned", False):
+                root.removeHandler(handler)
+                handler.close()
+
+    def test_repeated_setup_without_duplicate_owned_handlers_or_closing_unrelated(self, tmp_path):
+        import logging
+        from main import setup_logging
+
+        root = logging.getLogger()
+
+        unrelated_handler = logging.Handler()
+        unrelated_closed = False
+
+        def mark_closed():
+            nonlocal unrelated_closed
+            unrelated_closed = True
+
+        unrelated_handler.close = mark_closed
+        root.addHandler(unrelated_handler)
+
+        try:
+            log1 = tmp_path / "run1.log"
+            log2 = tmp_path / "run2.log"
+
+            setup_logging("INFO", log_file=log1)
+            owned_after_first = [h for h in root.handlers if getattr(h, "_cmp_owned", False)]
+            assert len(owned_after_first) == 2
+
+            setup_logging("DEBUG", log_file=log2)
+            owned_after_second = [h for h in root.handlers if getattr(h, "_cmp_owned", False)]
+            assert len(owned_after_second) == 2
+
+            assert unrelated_handler in root.handlers
+            assert not unrelated_closed
+        finally:
+            if unrelated_handler in root.handlers:
+                root.removeHandler(unrelated_handler)
+            for h in list(root.handlers):
+                if getattr(h, "_cmp_owned", False):
+                    root.removeHandler(h)
+                    h.close()
+
+
+class TestExceptionTracebackAndCleanupLogging:
+    @patch("main.navigate_to_dashboard")
+    def test_monitoring_recovery_exhausted_uses_safe_fixed_context(self, mock_navigate):
+        from dashboard_monitor import RecoveryExhaustedError
+
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap = MagicMock()
+                mock_imap_class.return_value = mock_imap
+
+                with patch("main.authenticate_cmp"):
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        mock_monitor = MagicMock()
+                        mock_monitor.monitor_once.side_effect = RecoveryExhaustedError("sensitive_token_abc123")
+                        mock_monitor_class.return_value = mock_monitor
+
+                        with patch("main.log") as mock_log:
+                            import main
+
+                            result = main.main(env=TEST_ENV)
+
+                            assert result == 1
+                            mock_log.error.assert_called_with(
+                                "Recovery exhausted during monitoring (%s)",
+                                "RecoveryExhaustedError",
+                            )
+
+    @patch("main.navigate_to_dashboard")
+    def test_cleanup_failure_logged_as_warning(self, mock_navigate):
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+
+            mock_page.close.side_effect = RuntimeError("Page close error")
+
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap = MagicMock()
+                mock_imap_class.return_value = mock_imap
+
+                with patch("main.authenticate_cmp"):
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        mock_monitor = MagicMock()
+                        mock_monitor.monitor_once.side_effect = KeyboardInterrupt()
+                        mock_monitor_class.return_value = mock_monitor
+
+                        with patch("main.log") as mock_log:
+                            import main
+
+                            result = main.main(env=TEST_ENV)
+
+                            assert result == 0
+                            mock_log.warning.assert_called()
+                            warning_call_args = [call[0][0] for call in mock_log.warning.call_args_list]
+                            assert any("Cleanup failure" in msg or "Failed to close page" in msg for msg in warning_call_args)
