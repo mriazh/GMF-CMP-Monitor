@@ -1,13 +1,15 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
-from datetime import datetime, timezone, timedelta
+
 from otp import (
-    OtpMessage,
     OtpError,
+    OtpMessage,
     extract_otp,
-    validate_subject,
-    validate_internal_date,
-    find_latest_candidate,
     fetch_and_verify_otp,
+    find_latest_candidate,
+    validate_internal_date,
+    validate_subject,
 )
 
 

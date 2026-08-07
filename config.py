@@ -1,27 +1,23 @@
-"""Configuration loading and validation.
-
-Settings are loaded from environment variables and/or an external .env file.
-All secrets are wrapped in SecretValue so they are never logged or printed.
-"""
+"""Configuration loading and validation."""
 
 from __future__ import annotations
 
 import logging
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 log = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.resolve()
-
 EXACT_OTP_SUBJECT = "CMP - YOUR TOKEN"
 APPROVED_CMP_HOST = "ep.iotcc.telkomsel.com"
 DEFAULT_RUN_START_TIMEZONE = "Asia/Jakarta"
+APPROVED_WARP_TRACE_HOSTS = {"cloudflare.com", "www.cloudflare.com"}
 
 
 class ConfigError(Exception):
@@ -41,7 +37,7 @@ class SecretValue:
         return "***REDACTED***"
 
     def __repr__(self) -> str:
-        return f"SecretValue({str(self)})"
+        return f"SecretValue({self!s})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,42 +72,61 @@ class Settings:
     runtime_artifact_dir: Path | None
     browser_storage_state_path: Path | None
     log_level: str
+    checkpoint_trac_path: Path | str | None = None
+    checkpoint_site: str = "VPN-GMF"
+    checkpoint_gateway_name: str = "GMFINETFW01"
+    checkpoint_gateway_ip: str | None = None
+    checkpoint_auth_mode: str = "client_managed"
+    checkpoint_allow_interactive: bool = False
+    checkpoint_username: SecretValue | None = None
+    checkpoint_password: SecretValue | None = None
+    warp_cli_path: Path | str | None = None
+    warp_variant: str = "consumer"
+    warp_mode: str = "warp"
+    warp_allow_dns_only: bool = False
+    warp_reuse_existing: bool = True
+    warp_disconnect_on_exit: bool = True
+    warp_trace_url: str = "https://www.cloudflare.com/cdn-cgi/trace"
+    office_network_probe_host: str = "mail.gmf-aeroasia.co.id"
+    office_network_probe_port: int = 993
+    office_network_probe_secondary_url: str | None = None
+    office_network_probe_timeout_seconds: float = 10.0
+    checkpoint_connect_timeout_seconds: float = 60.0
+    checkpoint_status_poll_interval_seconds: float = 2.0
+    checkpoint_retry_limit: int = 3
+    checkpoint_disconnect_timeout_seconds: float = 30.0
+    warp_connect_timeout_seconds: float = 60.0
+    warp_status_poll_interval_seconds: float = 2.0
+    warp_retry_limit: int = 3
+    warp_trace_timeout_seconds: float = 15.0
+    dashboard_retry_limit: int = 3
+    auth_cycle_retry_limit: int = 3
+
+
+def _strip_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
 
 
 def _environment(
     env: Mapping[str, str] | None = None,
     env_file: str | Path | None = None,
 ) -> dict[str, str]:
-    """Load environment variables from .env file and/or provided mapping.
-
-    Precedence (lowest to highest): defaults applied by load_settings, values
-    from the .env file, process environment variables, and finally the explicit
-    env mapping. Process environment variables therefore override .env values,
-    and an explicit env mapping overrides both.
-    """
-    if not env_file:
-        # Check current directory then project root for .env
-        for candidate in [Path(".env"), PROJECT_ROOT / ".env"]:
-            if candidate.exists():
-                env_file = candidate
-                break
-
+    """Load environment values without implicitly reading a .env beside tests."""
     values: dict[str, str] = {}
     if env_file:
         path = Path(env_file)
         if path.exists():
             for line in path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
-                if not line or line.startswith("#"):
+                if not line or line.startswith("#") or "=" not in line:
                     continue
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    values[k.strip()] = v.strip()
-    # Process environment variables override .env values.
-    for key, value in os.environ.items():
-        values[key] = value
-    # Explicit env mapping has the highest precedence.
-    if env:
+                key, value = line.split("=", 1)
+                values[key.strip()] = _strip_quotes(value.strip())
+    if env is None:
+        values.update(os.environ)
+    else:
         values.update(env)
     return values
 
@@ -119,31 +134,23 @@ def _environment(
 def _value(values: Mapping[str, str], key: str) -> str:
     if key not in values:
         raise ConfigError(f"Missing required setting: {key}")
-    val = values[key]
-    if not val or not val.strip():
+    value = _strip_quotes(str(values[key]).strip())
+    if not value:
         raise ConfigError(f"Required setting '{key}' must not be empty or whitespace")
-    return val.strip()
+    return value
 
 
 def _optional(values: Mapping[str, str], key: str, default: str) -> str:
-    val = values.get(key, default)
-    if val is None:
-        return default
-    return val.strip()
+    return _strip_quotes(str(values.get(key, default)).strip())
 
 
 def _boolean(values: Mapping[str, str], key: str, default: bool = True) -> bool:
-    val = values.get(key)
-    if val is None:
-        return default
-    val_lower = val.lower()
-    if val_lower in {"1", "true", "yes", "on"}:
+    value = _optional(values, key, str(default)).lower()
+    if value in {"1", "true", "yes", "on"}:
         return True
-    elif val_lower in {"0", "false", "no", "off"}:
+    if value in {"0", "false", "no", "off"}:
         return False
-    else:
-        # Do not include the actual invalid value in the error message to prevent leakage
-        raise ConfigError(f"{key} must be a boolean value (true/false, yes/no, on/off, 1/0)")
+    raise ConfigError(f"{key} must be a boolean value (true/false, yes/no, on/off, 1/0)")
 
 
 def _positive_int(values: Mapping[str, str], key: str, default: int) -> int:
@@ -169,18 +176,14 @@ def _positive_float(values: Mapping[str, str], key: str, default: float) -> floa
 
 
 def _external_path(path: Path, setting: str) -> Path:
-    """Reject paths that resolve inside the repository workspace.
-
-    Relative paths are resolved against PROJECT_ROOT so in-repo relative
-    values are rejected regardless of the current working directory.
-    """
+    """Reject paths that resolve inside the repository workspace."""
     if not path.is_absolute():
         path = PROJECT_ROOT / path
-    path = path.resolve()
+    resolved = path.resolve()
     try:
-        path.relative_to(PROJECT_ROOT)
+        resolved.relative_to(PROJECT_ROOT)
     except ValueError:
-        return path
+        return resolved
     raise ConfigError(f"{setting} must be outside the repository workspace")
 
 
@@ -197,33 +200,31 @@ def _firefox_executable_path(values: Mapping[str, str]) -> Path | None:
     return _external_path(path, "FIREFOX_EXECUTABLE_PATH")
 
 
+def _configured_executable(values: Mapping[str, str], key: str) -> Path | str | None:
+    configured = _optional(values, key, "")
+    if not configured:
+        return None
+    path = Path(configured)
+    return path.resolve() if path.is_absolute() else configured
+
+
 def _artifact_dir(values: Mapping[str, str]) -> Path:
     configured = _optional(values, "RUNTIME_ARTIFACT_DIR", "")
-    path = (
-        Path(configured)
-        if configured
-        else Path(tempfile.gettempdir()) / "gmf-cmp-monitor" / "artifacts"
-    )
+    path = Path(configured) if configured else Path(tempfile.gettempdir()) / "gmf-cmp-monitor" / "artifacts"
     return _external_path(path, "RUNTIME_ARTIFACT_DIR")
 
 
 def _validate_cmp_url(url: str, setting_name: str) -> str:
-    """Validate a CMP URL: HTTPS only, approved host only, no embedded secrets."""
     try:
         parsed = urlparse(url)
-    except Exception as exc:
-        raise ConfigError(f"Invalid URL for {setting_name}") from exc
-    if parsed.scheme != "https" or not parsed.netloc:
-        raise ConfigError(f"{setting_name} must be an HTTPS URL")
-    # Check for embedded credentials before the host check so that URLs such as
-    # https://user:pass@ep.iotcc.telkomsel.com/ are reported as credential leaks.
-    if parsed.username or parsed.password:
-        raise ConfigError(f"{setting_name} must not contain embedded credentials")
-    if parsed.hostname != APPROVED_CMP_HOST:
-        raise ConfigError(f"{setting_name} must be on host {APPROVED_CMP_HOST}")
-    if ":" in parsed.netloc:
-        raise ConfigError(f"{setting_name} must not specify a port")
-    try:
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ConfigError(f"{setting_name} must be an HTTPS URL")
+        if parsed.username or parsed.password:
+            raise ConfigError(f"{setting_name} must not contain embedded credentials")
+        if parsed.hostname != APPROVED_CMP_HOST:
+            raise ConfigError(f"{setting_name} must be on host {APPROVED_CMP_HOST}")
+        if ":" in parsed.netloc:
+            raise ConfigError(f"{setting_name} must not specify a port")
         if parsed.port is not None:
             raise ConfigError(f"{setting_name} must not specify a port")
     except ValueError as exc:
@@ -243,45 +244,68 @@ def load_settings(
     env: Mapping[str, str] | None = None,
     env_file: str | Path | None = None,
 ) -> Settings:
-    """Load and validate settings from environment and .env file."""
+    """Load and validate settings from environment and an optional dotenv file."""
     values = _environment(env, env_file)
     cas_url = _validate_cmp_url(_value(values, "CMP_CAS_URL"), "CMP_CAS_URL")
     cmp_products_url = _validate_cmp_url(_value(values, "CMP_PRODUCTS_URL"), "CMP_PRODUCTS_URL")
     cmp_dashboard_url = _validate_cmp_url(_value(values, "CMP_DASHBOARD_URL"), "CMP_DASHBOARD_URL")
-
     tls_mode = _optional(values, "IMAP_TLS_MODE", "imaps").lower()
     if tls_mode not in {"imaps", "starttls"}:
         raise ConfigError("IMAP_TLS_MODE must be either imaps or starttls")
     if not _boolean(values, "IMAP_VERIFY_TLS", True):
         raise ConfigError("IMAP_VERIFY_TLS must remain enabled")
-
     subject = _optional(values, "OTP_SUBJECT", EXACT_OTP_SUBJECT)
     if subject != EXACT_OTP_SUBJECT:
         raise ConfigError("OTP_SUBJECT must exactly match the approved CMP subject")
-
-    run_start_timezone = _validate_timezone(
-        _optional(values, "RUN_START_TIMEZONE", DEFAULT_RUN_START_TIMEZONE)
-    )
-
+    run_start_timezone = _validate_timezone(_optional(values, "RUN_START_TIMEZONE", DEFAULT_RUN_START_TIMEZONE))
     storage_state = _optional(values, "BROWSER_STORAGE_STATE_PATH", "")
-    storage_state_path = None
-    if storage_state:
-        path = _external_path(Path(storage_state), "BROWSER_STORAGE_STATE_PATH")
-        storage_state_path = path
-    firefox_executable_path = _firefox_executable_path(values)
-
+    storage_state_path = _external_path(Path(storage_state), "BROWSER_STORAGE_STATE_PATH") if storage_state else None
     log_level = _optional(values, "LOG_LEVEL", "INFO").upper()
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         raise ConfigError("LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL")
-
-    # Validate IMAP_HOST and IMAP_MAILBOX are non-empty
     imap_host = _optional(values, "IMAP_HOST", "mail.gmf-aeroasia.co.id")
     if not imap_host:
         raise ConfigError("IMAP_HOST must not be empty")
     imap_mailbox = _optional(values, "IMAP_MAILBOX", "INBOX")
     if not imap_mailbox:
         raise ConfigError("IMAP_MAILBOX must not be empty")
-
+    checkpoint_site = _optional(values, "CHECKPOINT_SITE", "VPN-GMF")
+    if not checkpoint_site:
+        raise ConfigError("CHECKPOINT_SITE must not be empty")
+    checkpoint_gateway_name = _optional(values, "CHECKPOINT_GATEWAY_NAME", "GMFINETFW01")
+    checkpoint_trac_path = _configured_executable(values, "CHECKPOINT_TRAC_PATH")
+    if checkpoint_trac_path is None:
+        checkpoint_trac_path = _configured_executable(values, "CHECKPOINT_CLI_PATH")
+    checkpoint_auth_mode = _optional(values, "CHECKPOINT_AUTH_MODE", "client_managed").lower()
+    if checkpoint_auth_mode not in {"client_managed", "credentials"}:
+        raise ConfigError("CHECKPOINT_AUTH_MODE must be client_managed or credentials")
+    if _boolean(values, "CHECKPOINT_ALLOW_INTERACTIVE", False):
+        raise ConfigError("CHECKPOINT_ALLOW_INTERACTIVE must remain false; interactive VPN is disabled")
+    checkpoint_username: SecretValue | None = None
+    checkpoint_password: SecretValue | None = None
+    if checkpoint_auth_mode == "credentials":
+        checkpoint_username = SecretValue(_value(values, "CHECKPOINT_USERNAME"))
+        checkpoint_password = SecretValue(_value(values, "CHECKPOINT_PASSWORD"))
+    warp_variant = _optional(values, "WARP_VARIANT", "consumer").lower()
+    if warp_variant != "consumer":
+        raise ConfigError("WARP_VARIANT must be consumer")
+    warp_mode = _optional(values, "WARP_MODE", "warp").lower()
+    if warp_mode != "warp":
+        raise ConfigError("WARP_MODE must be warp")
+    if _boolean(values, "WARP_ALLOW_DNS_ONLY", False):
+        raise ConfigError("WARP_ALLOW_DNS_ONLY must remain false")
+    warp_trace_url = _optional(values, "WARP_TRACE_URL", "https://www.cloudflare.com/cdn-cgi/trace")
+    trace = urlparse(warp_trace_url)
+    if trace.scheme != "https" or trace.hostname not in APPROVED_WARP_TRACE_HOSTS or trace.port is not None:
+        raise ConfigError("WARP_TRACE_URL must use an approved HTTPS Cloudflare host")
+    probe_host = _optional(values, "OFFICE_NETWORK_PROBE_HOST", imap_host)
+    if not probe_host:
+        raise ConfigError("OFFICE_NETWORK_PROBE_HOST must not be empty")
+    secondary_url = _optional(values, "OFFICE_NETWORK_PROBE_SECONDARY_URL", "") or None
+    if secondary_url:
+        secondary = urlparse(secondary_url)
+        if secondary.scheme != "https" or not secondary.hostname:
+            raise ConfigError("OFFICE_NETWORK_PROBE_SECONDARY_URL must be an HTTPS URL")
     return Settings(
         cas_url=cas_url,
         cmp_products_url=cmp_products_url,
@@ -301,14 +325,43 @@ def load_settings(
         run_start_timezone=run_start_timezone,
         browser_timeout_ms=_positive_int(values, "BROWSER_TIMEOUT_MS", 30000),
         navigation_timeout_ms=_positive_int(values, "NAVIGATION_TIMEOUT_MS", 60000),
-        otp_form_timeout_ms=_positive_int(values, "OTP_FORM_TIMEOUT_MS", 30000),
+        otp_form_timeout_ms=_positive_int(values, "OTP_FORM_TIMEOUT_MS", 60000),
         otp_clock_skew_tolerance_seconds=_positive_int(values, "OTP_CLOCK_SKEW_TOLERANCE_SECONDS", 120),
         refresh_interval_seconds=_positive_int(values, "REFRESH_INTERVAL_SECONDS", 60),
         recovery_retry_limit=_positive_int(values, "RECOVERY_RETRY_LIMIT", 3),
         recovery_backoff_seconds=_positive_int(values, "RECOVERY_BACKOFF_SECONDS", 5),
         headless=_boolean(values, "HEADLESS", False),
-        firefox_executable_path=firefox_executable_path,
+        firefox_executable_path=_firefox_executable_path(values),
         runtime_artifact_dir=_artifact_dir(values),
         browser_storage_state_path=storage_state_path,
         log_level=log_level,
+        checkpoint_trac_path=checkpoint_trac_path,
+        checkpoint_site=checkpoint_site,
+        checkpoint_gateway_name=checkpoint_gateway_name,
+        checkpoint_gateway_ip=_optional(values, "CHECKPOINT_GATEWAY_IP", "") or None,
+        checkpoint_auth_mode=checkpoint_auth_mode,
+        checkpoint_allow_interactive=False,
+        checkpoint_username=checkpoint_username,
+        checkpoint_password=checkpoint_password,
+        warp_cli_path=_configured_executable(values, "WARP_CLI_PATH"),
+        warp_variant=warp_variant,
+        warp_mode=warp_mode,
+        warp_allow_dns_only=False,
+        warp_reuse_existing=_boolean(values, "WARP_REUSE_EXISTING", True),
+        warp_disconnect_on_exit=_boolean(values, "WARP_DISCONNECT_ON_EXIT", True),
+        warp_trace_url=warp_trace_url,
+        office_network_probe_host=probe_host,
+        office_network_probe_port=_positive_int(values, "OFFICE_NETWORK_PROBE_PORT", 993),
+        office_network_probe_secondary_url=secondary_url,
+        office_network_probe_timeout_seconds=_positive_float(values, "OFFICE_NETWORK_PROBE_TIMEOUT_SECONDS", 10.0),
+        checkpoint_connect_timeout_seconds=_positive_float(values, "CHECKPOINT_CONNECT_TIMEOUT_SECONDS", 60.0),
+        checkpoint_status_poll_interval_seconds=_positive_float(values, "CHECKPOINT_STATUS_POLL_INTERVAL_SECONDS", 2.0),
+        checkpoint_retry_limit=_positive_int(values, "CHECKPOINT_RETRY_LIMIT", 3),
+        checkpoint_disconnect_timeout_seconds=_positive_float(values, "CHECKPOINT_DISCONNECT_TIMEOUT_SECONDS", 30.0),
+        warp_connect_timeout_seconds=_positive_float(values, "WARP_CONNECT_TIMEOUT_SECONDS", 60.0),
+        warp_status_poll_interval_seconds=_positive_float(values, "WARP_STATUS_POLL_INTERVAL_SECONDS", 2.0),
+        warp_retry_limit=_positive_int(values, "WARP_RETRY_LIMIT", 3),
+        warp_trace_timeout_seconds=_positive_float(values, "WARP_TRACE_TIMEOUT_SECONDS", 15.0),
+        dashboard_retry_limit=_positive_int(values, "DASHBOARD_RETRY_LIMIT", 3),
+        auth_cycle_retry_limit=_positive_int(values, "AUTH_CYCLE_RETRY_LIMIT", 3),
     )

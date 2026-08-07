@@ -1,20 +1,16 @@
 """Tests for configuration validation."""
 
-import os
 import tempfile
-from pathlib import Path
 
 import pytest
 
 from config import (
-    ConfigError,
-    EXACT_OTP_SUBJECT,
     APPROVED_CMP_HOST,
-    DEFAULT_RUN_START_TIMEZONE,
-    load_settings,
+    EXACT_OTP_SUBJECT,
     PROJECT_ROOT,
+    ConfigError,
     SecretValue,
-    Settings,
+    load_settings,
 )
 
 
@@ -171,29 +167,50 @@ class TestCasUrlValidation:
 
 
 class TestEnvFileLoading:
-    def test_automatic_env_loading(self, tmp_path):
-        # Create a temp .env file
-        env_content = (
-            "CMP_CAS_URL=https://ep.iotcc.telkomsel.com/cas/login\n"
-            "CMP_PRODUCTS_URL=https://ep.iotcc.telkomsel.com/#!products\n"
-            "CMP_DASHBOARD_URL=https://ep.iotcc.telkomsel.com/#!dashboard\n"
-            "CMP_USERNAME=testuser\n"
-            "CMP_PASSWORD=testpass\n"
-            "IMAP_USERNAME=imapuser\n"
-            "IMAP_PASSWORD=imappass\n"
+    def test_quoted_values_are_unwrapped(self, tmp_path, monkeypatch):
+        for k in (
+            "CMP_CAS_URL",
+            "CMP_PRODUCTS_URL",
+            "CMP_DASHBOARD_URL",
+            "CMP_USERNAME",
+            "CMP_PASSWORD",
+            "IMAP_USERNAME",
+            "IMAP_PASSWORD",
+            "CHECKPOINT_TRAC_PATH",
+        ):
+            monkeypatch.delenv(k, raising=False)
+        env_file = tmp_path / "settings.env"
+        env_file.write_text(
+            'CMP_CAS_URL="https://ep.iotcc.telkomsel.com/cas/login"\n'
+            'CMP_PRODUCTS_URL="https://ep.iotcc.telkomsel.com/#!products"\n'
+            'CMP_DASHBOARD_URL="https://ep.iotcc.telkomsel.com/#!dashboard"\n'
+            'CMP_USERNAME="testuser"\n'
+            'CMP_PASSWORD="testpass"\n'
+            'IMAP_USERNAME="imapuser"\n'
+            'IMAP_PASSWORD="imappass"\n'
+            'CHECKPOINT_TRAC_PATH="C:/Program Files (x86)/CheckPoint/trac.exe"\n'
         )
+        settings = load_settings(env_file=env_file)
+        assert settings.cmp_username.get_secret_value() == "testuser"
+        assert str(settings.checkpoint_trac_path) == "C:\\Program Files (x86)\\CheckPoint\\trac.exe"
+
+    def test_environment_loading_does_not_discover_dotenv(self, tmp_path, monkeypatch):
+        for key in (
+            "CMP_CAS_URL",
+            "CMP_PRODUCTS_URL",
+            "CMP_DASHBOARD_URL",
+            "CMP_USERNAME",
+            "CMP_PASSWORD",
+            "IMAP_USERNAME",
+            "IMAP_PASSWORD",
+        ):
+            monkeypatch.delenv(key, raising=False)
         dot_env = tmp_path / ".env"
-        dot_env.write_text(env_content)
+        dot_env.write_text(self._minimal_env_content())
+        monkeypatch.chdir(tmp_path)
 
-        # Change CWD and load settings automatically
-        original_cwd = Path.cwd()
-        os.chdir(tmp_path)
-        try:
-            settings = load_settings()
-            assert settings.cmp_username.get_secret_value() == "testuser"
-        finally:
-            os.chdir(original_cwd)
-
+        with pytest.raises(ConfigError, match="CMP_CAS_URL"):
+            load_settings()
     def test_root_dotenv_validation(self):
         """Validate the root .env file if present in the repository."""
         env_path = PROJECT_ROOT / ".env"
@@ -242,21 +259,6 @@ class TestEnvFileLoading:
         monkeypatch.setenv("LOG_LEVEL", "WARNING")
         settings = load_settings(env_file=dot_env, env={"LOG_LEVEL": "DEBUG"})
         assert settings.log_level == "DEBUG"
-
-    def test_auto_dotenv_precedence_no_env_override(self, tmp_path, monkeypatch):
-        """Automatic .env discovery keeps defaults when nothing overrides them."""
-        dot_env = tmp_path / ".env"
-        dot_env.write_text(self._minimal_env_content() + "LOG_LEVEL=INFO\n")
-
-        original_cwd = Path.cwd()
-        monkeypatch.delenv("LOG_LEVEL", raising=False)
-        os.chdir(tmp_path)
-        try:
-            settings = load_settings()
-            assert settings.log_level == "INFO"
-        finally:
-            os.chdir(original_cwd)
-
 
 class TestTimezoneValidation:
     """Tests for timezone validation."""
@@ -543,6 +545,158 @@ class TestRuntimeSettings:
         assert settings.refresh_interval_seconds == 60
         assert settings.recovery_retry_limit == 3
         assert settings.recovery_backoff_seconds == 5
+
+
+
+class TestCheckpointConfig:
+    def test_default_checkpoint_auth_mode(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+        }
+        settings = load_settings(env=env)
+        assert settings.checkpoint_auth_mode == "client_managed"
+        assert settings.checkpoint_allow_interactive is False
+        assert settings.checkpoint_username is None
+        assert settings.checkpoint_password is None
+
+    def test_checkpoint_credentials_mode_valid(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "CHECKPOINT_AUTH_MODE": "credentials",
+            "CHECKPOINT_USERNAME": "cp_user",
+            "CHECKPOINT_PASSWORD": "cp_password",
+        }
+        settings = load_settings(env=env)
+        assert settings.checkpoint_auth_mode == "credentials"
+        assert settings.checkpoint_allow_interactive is False
+        assert isinstance(settings.checkpoint_username, SecretValue)
+        assert isinstance(settings.checkpoint_password, SecretValue)
+        assert settings.checkpoint_username.get_secret_value() == "cp_user"
+        assert settings.checkpoint_password.get_secret_value() == "cp_password"
+        assert str(settings.checkpoint_username) == "***REDACTED***"
+        assert repr(settings.checkpoint_username) == "SecretValue(***REDACTED***)"
+        assert str(settings.checkpoint_password) == "***REDACTED***"
+        assert repr(settings.checkpoint_password) == "SecretValue(***REDACTED***)"
+
+    def test_checkpoint_credentials_mode_missing_username(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "CHECKPOINT_AUTH_MODE": "credentials",
+            "CHECKPOINT_PASSWORD": "cp_password",
+        }
+        with pytest.raises(ConfigError, match="CHECKPOINT_USERNAME"):
+            load_settings(env=env)
+
+    def test_checkpoint_credentials_mode_blank_username(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "CHECKPOINT_AUTH_MODE": "credentials",
+            "CHECKPOINT_USERNAME": "   ",
+            "CHECKPOINT_PASSWORD": "cp_password",
+        }
+        with pytest.raises(ConfigError, match="CHECKPOINT_USERNAME"):
+            load_settings(env=env)
+
+    def test_checkpoint_credentials_mode_missing_password(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "CHECKPOINT_AUTH_MODE": "credentials",
+            "CHECKPOINT_USERNAME": "cp_user",
+        }
+        with pytest.raises(ConfigError, match="CHECKPOINT_PASSWORD"):
+            load_settings(env=env)
+
+    def test_checkpoint_credentials_mode_blank_password(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "CHECKPOINT_AUTH_MODE": "credentials",
+            "CHECKPOINT_USERNAME": "cp_user",
+            "CHECKPOINT_PASSWORD": "   ",
+        }
+        with pytest.raises(ConfigError, match="CHECKPOINT_PASSWORD"):
+            load_settings(env=env)
+
+    def test_checkpoint_auth_mode_invalid(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "CHECKPOINT_AUTH_MODE": "invalid_mode",
+        }
+        with pytest.raises(ConfigError, match="CHECKPOINT_AUTH_MODE"):
+            load_settings(env=env)
+
+    def test_checkpoint_interactive_mode_rejected(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "CHECKPOINT_ALLOW_INTERACTIVE": "true",
+        }
+        with pytest.raises(ConfigError, match="CHECKPOINT_ALLOW_INTERACTIVE"):
+            load_settings(env=env)
+
+    def test_checkpoint_credentials_ignored_in_client_managed(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "CHECKPOINT_AUTH_MODE": "client_managed",
+            "CHECKPOINT_USERNAME": "cp_user",
+            "CHECKPOINT_PASSWORD": "cp_pass",
+        }
+        settings = load_settings(env=env)
+        assert settings.checkpoint_auth_mode == "client_managed"
+        assert settings.checkpoint_username is None
+        assert settings.checkpoint_password is None
 
 
 class TestRequiredValueValidation:

@@ -1,14 +1,24 @@
 """Live end-to-end integration test for CMP authentication and dashboard navigation.
+
 Skipped automatically if .env is not present.
 """
-from pathlib import Path
+
+from __future__ import annotations
+
+import logging
+
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
-from config import load_settings, PROJECT_ROOT
-from imap_client import ImapClient, SystemClock
 from cmp_auth import authenticate_cmp
-from dashboard_monitor import classify_state, DashboardState, navigate_to_dashboard
+from config import PROJECT_ROOT, load_settings
+from dashboard_monitor import DashboardState, classify_state, navigate_to_dashboard
+from imap_client import ImapClient, SystemClock
+from network_diag import run_network_diagnostic
+
+log = logging.getLogger(__name__)
+
 
 @pytest.mark.live
 def test_live_login_to_dashboard():
@@ -17,6 +27,15 @@ def test_live_login_to_dashboard():
         pytest.skip(".env file not present in project root")
 
     settings = load_settings(env_file=env_path)
+
+    # Perform read-only diagnostic check prior to live attempt
+    network_report = run_network_diagnostic(settings=settings)
+    log.info(
+        "Live test network diagnosis: position=%s, ready=%s",
+        network_report.position.value,
+        network_report.ready_for_live_test,
+    )
+
     clock = SystemClock()
     imap_client = ImapClient(settings, clock)
     imap_client.connect()
@@ -24,7 +43,7 @@ def test_live_login_to_dashboard():
     browser = None
     try:
         with sync_playwright() as playwright:
-            launch_options: dict[str, bool | str] = {"headless": settings.headless}
+            launch_options: dict[str, bool | str] = {"headless": True}
             if settings.firefox_executable_path is not None:
                 launch_options["executable_path"] = str(settings.firefox_executable_path)
             browser = playwright.firefox.launch(**launch_options)
@@ -42,6 +61,9 @@ def test_live_login_to_dashboard():
         if browser is not None:
             try:
                 browser.close()
-            except Exception:
-                pass
-        imap_client.disconnect()
+            except (PlaywrightError, OSError):
+                log.debug("Live browser cleanup failed")
+        try:
+            imap_client.disconnect()
+        except (OSError, RuntimeError):
+            log.debug("IMAP cleanup failed")

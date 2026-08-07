@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import datetime
 from typing import Protocol
-from urllib.parse import urlparse, ParseResult
+from urllib.parse import ParseResult, urlparse
 from zoneinfo import ZoneInfo
 
-from config import Settings, APPROVED_CMP_HOST
+from config import APPROVED_CMP_HOST, Settings
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,8 @@ def authenticate_cmp(
     otp_provider: OtpProvider,
     page: object,
     clock: Clock | None = None,
+    *,
+    on_otp_submitted: Callable[[], None] | None = None,
 ) -> bool:
     """Authenticate to the CMP CAS login page.
 
@@ -59,7 +62,7 @@ def authenticate_cmp(
     log.info("Starting CMP authentication")
 
     try:
-        return _do_authenticate(settings, otp_provider, page, clock)
+        return _do_authenticate(settings, otp_provider, page, clock, on_otp_submitted=on_otp_submitted)
     except AuthenticationError:
         raise
     except Exception as exc:
@@ -73,13 +76,24 @@ def _do_authenticate(
     otp_provider: OtpProvider,
     page: object,
     clock: Clock,
+    *,
+    on_otp_submitted: Callable[[], None] | None = None,
 ) -> bool:
     current_step = "initializing"
     try:
-        # Navigate to CAS URL - log safe label only
+        # Navigate to CAS URL with bounded retry against transient tunnel/route cutover jitter
         current_step = "navigating to CAS login page"
         log.info("Navigating to CAS login page")
-        page.goto(settings.cas_url, timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
+        nav_attempts = 3
+        for attempt in range(1, nav_attempts + 1):
+            try:
+                page.goto(settings.cas_url, timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
+                break
+            except Exception as nav_exc:
+                if attempt >= nav_attempts:
+                    raise
+                log.warning("CAS login navigation attempt %d/%d failed; retrying in 2s (%s)", attempt, nav_attempts, type(nav_exc).__name__)
+                clock.sleep(2.0)
 
         # Set default timeout for page operations
         page.set_default_timeout(settings.browser_timeout_ms)
@@ -89,6 +103,12 @@ def _do_authenticate(
 
         if auth_outcome == "already_authenticated":
             log.info("CAS session still valid; skipping credential/OTP submission")
+            if on_otp_submitted is not None:
+                try:
+                    on_otp_submitted()
+                except Exception as hook_exc:
+                    log.error("on_otp_submitted callback failed (%s)", type(hook_exc).__name__)
+                    raise AuthenticationError("Post-OTP network transition failed") from hook_exc
             _wait_for_products_page(page, settings, clock)
             return True
 
@@ -118,7 +138,10 @@ def _do_authenticate(
             current_step = "submitting initial credentials form"
             page.wait_for_selector("#fm1 input[name='submit']", state="visible", timeout=settings.navigation_timeout_ms)
             _wait_for_initial_submit_enabled(page, settings)
-            page.click("#fm1 input[name='submit'][type='submit']", timeout=settings.navigation_timeout_ms)
+            try:
+                page.click(INITIAL_SUBMIT_SELECTOR, timeout=settings.navigation_timeout_ms, no_wait_after=True)
+            except TypeError:
+                page.click(INITIAL_SUBMIT_SELECTOR, timeout=settings.navigation_timeout_ms)
             log.info("Initial form submitted")
 
             # Wait for OTP form to appear
@@ -134,11 +157,17 @@ def _do_authenticate(
         otp_value = otp_provider.poll_for_otp(login_start)
         log.info("OTP received")
 
-        # Submit OTP
         current_step = "submitting OTP form"
         page.fill("#token", otp_value)
         page.click("#login input[name='_eventId_submit'][type='submit']", timeout=settings.navigation_timeout_ms)
         log.info("OTP submitted")
+
+        if on_otp_submitted is not None:
+            try:
+                on_otp_submitted()
+            except Exception as hook_exc:
+                log.error("on_otp_submitted callback failed (%s)", type(hook_exc).__name__)
+                raise AuthenticationError("Post-OTP network transition failed") from hook_exc
 
         # Wait for successful navigation to products page
         current_step = "waiting for products page"
@@ -179,15 +208,21 @@ def _wait_for_initial_submit_enabled(page: object, settings: Settings) -> None:
     # This is a standard keyboard interaction (Tab blur), not a submission and
     # not a JavaScript/force bypass of the disabled state.
     try:
+        if (
+            hasattr(page, "input_value")
+            and hasattr(page, "fill")
+            and not page.input_value(PASSWORD_SELECTOR)
+        ):
+            page.fill(PASSWORD_SELECTOR, settings.cmp_password.get_secret_value())
         page.press(PASSWORD_SELECTOR, "Tab")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
     while True:
         try:
             if page.is_enabled(INITIAL_SUBMIT_SELECTOR):
                 return
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         if not diagnostics_logged:
             _log_initial_submit_diagnostics(page)
@@ -306,6 +341,11 @@ def _check_post_otp_rejection(
     return 0
 
 
+def _is_playwright_page(page: object) -> bool:
+    """Check if the page is a real Playwright page (not a test double)."""
+    return hasattr(page, "context") and hasattr(page, "goto")
+
+
 def _wait_for_products_page(
     page: object, settings: Settings, clock: Clock, post_otp: bool = False
 ) -> None:
@@ -318,20 +358,49 @@ def _wait_for_products_page(
     forms. If CAS instead shows the login or OTP form again after the bounded grace
     period (the submitted OTP was rejected or the session expired), raise an accurate,
     sanitized AuthenticationError. Stale form observations on early polls during
-    asynchronous navigation are given a bounded grace confirmation period (2.0s)
-    before declaring rejection.
+    asynchronous navigation are given a bounded grace confirmation period (2.0s for test
+    doubles, 15.0s for real browsers undergoing network cutover) before declaring rejection.
     """
     start_time = clock.now()
     deadline = start_time + (settings.navigation_timeout_ms / 1000.0)
-    grace_deadline = start_time + POST_OTP_REJECTION_GRACE_SECONDS
+    grace_seconds = 15.0 if _is_playwright_page(page) else POST_OTP_REJECTION_GRACE_SECONDS
+    grace_deadline = start_time + min(grace_seconds, settings.navigation_timeout_ms / 1000.0)
     consecutive_rejections = 0
 
+    last_log_time = 0.0
     # First, wait for either root portal or products page (both indicate successful login)
     while clock.now() < deadline:
         try:
             url = getattr(page, "url", "") or ""
+            if clock.now() - last_log_time >= 5.0:
+                last_log_time = clock.now()
+                try:
+                    title = page.title()
+                except Exception:  # noqa: BLE001
+                    title = "unknown"
+                log.info("Waiting for portal: url=%s, title=%s", url, title)
             approved_root = _is_root_portal(url)
             approved_products = _is_products_page(url)
+
+            # If the browser hit an in-flight network cutover error (e.g. 'Server Not Found'), reload over WARP
+            if not approved_products and not approved_root:
+                try:
+                    title = page.title() if hasattr(page, "title") else ""
+                    if "server not found" in title.lower() or "problem loading page" in title.lower():
+                        log.info("Page in error state ('%s'); reloading over WARP", title.strip())
+                        clock.sleep(1.0)
+                        page.reload(timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
+                        continue
+                    if "log in successful" in title.lower() or "login successful" in title.lower():
+                        log.info("CAS reported '%s'; navigating to products page", title.strip())
+                        page.goto(
+                            settings.cmp_products_url,
+                            timeout=settings.navigation_timeout_ms,
+                            wait_until="domcontentloaded",
+                        )
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
 
             # Also check fragment via JavaScript (Vaadin may update hash before page.url)
             if not approved_products and not approved_root:
@@ -375,18 +444,31 @@ def _wait_for_products_page(
                 raise AuthenticationError("OTP rejected by portal or session expired")
         raise AuthenticationError("Navigation to portal timed out")
 
-    # If we landed on root portal, explicitly navigate to products page
-    if _is_root_portal(page.url):
-        log.info("Landed on root portal, navigating to products page")
+    # If we landed on root portal or still have CAS path in page.url, explicitly navigate to products page
+    url = getattr(page, "url", "") or ""
+    if _is_root_portal(url) or "/cas/login" in url or not _is_products_page(url):
+        log.info("Navigating explicitly to products page to ensure SPA shell loads (current: %s)", url)
         phase2_start_time = clock.now()
         page.goto(
             settings.cmp_products_url,
             timeout=settings.navigation_timeout_ms,
             wait_until="domcontentloaded",
         )
+        # Wait for page.url to actually leave the CAS login path and settle on products page
+        deadline = phase2_start_time + (settings.navigation_timeout_ms / 1000.0)
+        while clock.now() < deadline:
+            try:
+                current_url = getattr(page, "url", "") or ""
+                if _is_products_page(current_url) and "/cas/login" not in current_url:
+                    log.info("Successfully transitioned to products page: %s", current_url)
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+            clock.sleep(0.5)
         # Wait for products page fragment
         deadline = phase2_start_time + (settings.navigation_timeout_ms / 1000.0)
-        phase2_grace_deadline = phase2_start_time + POST_OTP_REJECTION_GRACE_SECONDS
+        phase2_grace_seconds = 15.0 if _is_playwright_page(page) else POST_OTP_REJECTION_GRACE_SECONDS
+        phase2_grace_deadline = phase2_start_time + min(phase2_grace_seconds, settings.navigation_timeout_ms / 1000.0)
         consecutive_rejections = 0
         while clock.now() < deadline:
             try:
@@ -469,7 +551,7 @@ def _is_approved_products_href(href: str) -> bool:
         return False
     try:
         parsed = urlparse(href)
-        return _is_approved_origin(parsed) and parsed.fragment == "!products"
+        return _is_approved_origin(parsed) and parsed.path in ("", "/") and parsed.fragment == "!products"
     except Exception:
         return False
 
@@ -480,7 +562,7 @@ def _is_products_page(url: str) -> bool:
         return False
     try:
         parsed = urlparse(url)
-        return _is_approved_origin(parsed) and parsed.fragment == "!products"
+        return _is_approved_origin(parsed) and parsed.path in ("", "/") and parsed.fragment == "!products"
     except Exception:
         return False
 

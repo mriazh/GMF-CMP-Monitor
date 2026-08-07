@@ -1,14 +1,13 @@
 """Tests for IMAP client - all offline, using dependency injection."""
 
-import email
 import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
-from datetime import datetime, timezone, timedelta
 
 import pytest
 
-from config import Settings, SecretValue
-from otp import OtpMessage, OtpError, extract_otp, find_latest_candidate, fetch_and_verify_otp
+from config import SecretValue, Settings
+from otp import OtpError, OtpMessage, fetch_and_verify_otp, find_latest_candidate
 
 
 class FakeClock:
@@ -82,12 +81,12 @@ class TestExactOtpSubjectFiltering:
         validate_subject(msg.subject)  # Should not raise
 
     def test_near_match_rejected(self):
-        from otp import validate_subject, OtpError
+        from otp import validate_subject
         with pytest.raises(OtpError, match="Invalid subject"):
             validate_subject("CMP - YOUR TOKEN ")
 
     def test_wrong_subject_rejected(self):
-        from otp import validate_subject, OtpError
+        from otp import validate_subject
         with pytest.raises(OtpError, match="Invalid subject"):
             validate_subject("CMP - YOUR CODE")
 
@@ -101,7 +100,7 @@ class TestStaleOtpRejection:
             internal_date=datetime(2024, 1, 1, 11, 59, tzinfo=timezone.utc),
             body="Code: 111111",
         )
-        from otp import validate_internal_date, OtpError
+        from otp import validate_internal_date
         # tolerance_seconds=0 preserves the strict pre-tolerance behavior:
         # any message dated before run_start is stale.
         with pytest.raises(OtpError, match="Stale message"):
@@ -135,7 +134,6 @@ class TestNewestOtpSelection:
         msg2 = OtpMessage("2", "CMP - YOUR TOKEN", datetime(2024, 1, 1, 12, 5, tzinfo=timezone.utc), "Code: 222222")
         msg3 = OtpMessage("3", "CMP - YOUR TOKEN", datetime(2024, 1, 1, 12, 3, tzinfo=timezone.utc), "Code: 333333")
 
-        from otp import find_latest_candidate
         result = find_latest_candidate([msg1, msg2, msg3], run_start)
         assert result.uid == "2"
 
@@ -163,7 +161,7 @@ class TestFetchAndVerifyOtp:
         def recheck(uid: str) -> OtpMessage | None:
             return None
 
-        from otp import fetch_and_verify_otp, OtpError
+        from otp import fetch_and_verify_otp
         with pytest.raises(OtpError, match="Candidate vanished"):
             fetch_and_verify_otp([msg], run_start, recheck)
 
@@ -175,7 +173,7 @@ class TestFetchAndVerifyOtp:
         def recheck(uid: str) -> OtpMessage | None:
             return changed_msg
 
-        from otp import fetch_and_verify_otp, OtpError
+        from otp import fetch_and_verify_otp
         with pytest.raises(OtpError, match="Candidate changed"):
             fetch_and_verify_otp([msg], run_start, recheck)
 
@@ -224,8 +222,9 @@ class TestInternaldParsing:
     """Tests for INTERNALDATE parsing from IMAP FETCH response."""
 
     def test_parse_valid_internaldatetime(self):
+        from datetime import timezone
+
         from imap_client import ImapClient
-        from datetime import timezone, timedelta
         
         settings = make_test_settings()
         clock = FakeClock(time.time())
@@ -245,8 +244,9 @@ class TestInternaldParsing:
         assert result.tzinfo == timezone.utc
 
     def test_parse_internaldatetime_with_offset(self):
+        from datetime import timedelta
+
         from imap_client import ImapClient
-        from datetime import timezone, timedelta
         
         settings = make_test_settings()
         clock = FakeClock(time.time())
@@ -359,8 +359,8 @@ class TestMessageRejection:
         assert "123456" in result.body
 
     def test_file_logger_creation(self):
-        import logging
         import os
+
         from main import setup_logging
         
         log_file = "monitor_test.log"
@@ -380,7 +380,7 @@ class TestRecheckBehavior:
 
     def test_recheck_compares_all_fields(self):
         # fetch_and_verify_otp compares uid, subject, internal_date, body
-        from otp import fetch_and_verify_otp, OtpError
+        from otp import fetch_and_verify_otp
         
         run_start = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
         msg = create_otp_message(uid="1", body="Code: 111111")
@@ -397,7 +397,7 @@ class TestRecheckBehavior:
             fetch_and_verify_otp([msg], run_start, recheck)
 
     def test_recheck_compares_internal_date(self):
-        from otp import fetch_and_verify_otp, OtpError
+        from otp import fetch_and_verify_otp
         
         run_start = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
         msg = create_otp_message(uid="1", body="Code: 111111")
@@ -414,7 +414,7 @@ class TestRecheckBehavior:
             fetch_and_verify_otp([msg], run_start, recheck)
 
     def test_recheck_compares_subject(self):
-        from otp import fetch_and_verify_otp, OtpError
+        from otp import fetch_and_verify_otp
 
         run_start = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
         msg = create_otp_message(uid="1", body="Code: 111111")
@@ -483,6 +483,7 @@ class TestPollingLogic:
 
     def test_refresh_mailbox_reselects_when_noop_fails(self):
         import imaplib
+
         from imap_client import ImapClient
 
         settings = make_test_settings()
@@ -689,7 +690,7 @@ class TestOtpExtractionFromRecheckedBody:
 
     def test_changed_body_on_recheck_rejected(self):
         """A rechecked message whose body changed must be rejected."""
-        from otp import fetch_and_verify_otp, OtpError
+        from otp import fetch_and_verify_otp
 
         run_start = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
         msg = create_otp_message(uid="1", body="Code: 111111")
@@ -711,8 +712,9 @@ class TestReadOnlyImapBehavior:
 
     def test_select_mailbox_readonly(self):
         """Verify connect method uses select(mailbox, readonly=True)."""
-        from imap_client import ImapClient
         from unittest.mock import MagicMock, patch
+
+        from imap_client import ImapClient
 
         settings = make_test_settings()
         clock = FakeClock(time.time())
@@ -737,8 +739,9 @@ class TestImapCleanupAfterErrors:
 
     def test_disconnect_closes_and_logs_out(self):
         """Verify disconnect calls close() and logout()."""
-        from imap_client import ImapClient
         from unittest.mock import MagicMock
+
+        from imap_client import ImapClient
 
         settings = make_test_settings()
         clock = FakeClock(time.time())
@@ -755,10 +758,9 @@ class TestImapCleanupAfterErrors:
 
     def test_disconnect_handles_errors_gracefully(self):
         """Verify disconnect handles errors gracefully and clears connection."""
+        from unittest.mock import MagicMock, patch
+
         from imap_client import ImapClient
-        from unittest.mock import MagicMock
-        import logging
-        from unittest.mock import patch
 
         settings = make_test_settings()
         clock = FakeClock(time.time())
@@ -788,8 +790,9 @@ class TestImapConnectionErrorSanitization:
 
     def test_connect_failure_raises_safe_error(self):
         """Verify connect raises ImapConnectionError without sensitive data."""
+        from unittest.mock import patch
+
         from imap_client import ImapClient, ImapConnectionError
-        from unittest.mock import MagicMock, patch
 
         settings = make_test_settings()
         clock = FakeClock(time.time())
@@ -871,7 +874,6 @@ class TestExactOtpSubjectDecoding:
     def test_full_flow_rejects_subject_with_trailing_space(self):
         """Full IMAP flow must reject messages with trailing space in subject."""
         from imap_client import ImapClient
-        from otp import OtpError
 
         settings = make_test_settings()
         clock = FakeClock(time.time())
@@ -888,7 +890,7 @@ class TestExactOtpSubjectDecoding:
         # but we can verify the parsing preserves the trailing space
         # by testing _parse_imap_message with a mock fetch response
         # This is a unit test of the parsing behavior
-        pass  # Placeholder - full integration tested via otp.py tests
+        # Placeholder - full integration tested via otp.py tests
 
 
 class TestImapSubjectValidation:
@@ -912,8 +914,9 @@ class TestImapConnectionCleanup:
 
     def test_connect_login_failure_cleanup(self):
         """If login fails, connection should be cleaned up."""
-        from imap_client import ImapClient
         from unittest.mock import MagicMock, patch
+
+        from imap_client import ImapClient
 
         settings = make_test_settings()
         clock = FakeClock(time.time())
@@ -937,8 +940,9 @@ class TestImapConnectionCleanup:
 
     def test_connect_select_failure_cleanup(self):
         """If mailbox selection fails, connection should be cleaned up."""
-        from imap_client import ImapClient
         from unittest.mock import MagicMock, patch
+
+        from imap_client import ImapClient
 
         settings = make_test_settings()
         clock = FakeClock(time.time())
@@ -962,8 +966,9 @@ class TestImapConnectionCleanup:
 
     def test_disconnect_close_failure_then_logout(self):
         """disconnect should attempt logout even if close fails."""
-        from imap_client import ImapClient
         from unittest.mock import MagicMock
+
+        from imap_client import ImapClient
 
         settings = make_test_settings()
         clock = FakeClock(time.time())
@@ -982,8 +987,9 @@ class TestImapConnectionCleanup:
 
     def test_disconnect_successful(self):
         """disconnect should close and logout on success."""
-        from imap_client import ImapClient
         from unittest.mock import MagicMock
+
+        from imap_client import ImapClient
 
         settings = make_test_settings()
         clock = FakeClock(time.time())
@@ -999,9 +1005,9 @@ class TestImapConnectionCleanup:
 
     def test_disconnect_no_secrets_in_errors(self):
         """Error messages/logs must not contain secret values."""
-        from imap_client import ImapClient
         from unittest.mock import MagicMock, patch
-        import logging
+
+        from imap_client import ImapClient
 
         settings = make_test_settings()
         clock = FakeClock(time.time())

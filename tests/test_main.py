@@ -472,6 +472,7 @@ class TestLoggingSetup:
     def test_timestamped_default_log_filename(self, tmp_path, monkeypatch):
         import logging
         import re
+
         from main import setup_logging
 
         monkeypatch.chdir(tmp_path)
@@ -481,7 +482,7 @@ class TestLoggingSetup:
         file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
         assert len(file_handlers) >= 1
 
-        created_files = list(tmp_path.glob("monitor_*.log"))
+        created_files = list(tmp_path.glob("logs/monitor_*.log")) or list(tmp_path.glob("monitor_*.log"))
         assert len(created_files) == 1
         assert re.match(r"^monitor_\d{8}_\d{6}\.log$", created_files[0].name)
 
@@ -492,6 +493,7 @@ class TestLoggingSetup:
 
     def test_explicit_log_path(self, tmp_path):
         import logging
+
         from main import setup_logging
 
         explicit_path = tmp_path / "custom_logs" / "test_run.log"
@@ -608,6 +610,7 @@ class TestLoggingSetup:
 
     def test_repeated_setup_without_duplicate_owned_handlers_or_closing_unrelated(self, tmp_path):
         import logging
+
         from main import setup_logging
 
         root = logging.getLogger()
@@ -716,3 +719,82 @@ class TestExceptionTracebackAndCleanupLogging:
                             mock_log.warning.assert_called()
                             warning_call_args = [call[0][0] for call in mock_log.warning.call_args_list]
                             assert any("Cleanup failure" in msg or "Failed to close page" in msg for msg in warning_call_args)
+
+
+
+class TestMainVpnLifecycle:
+    @patch("main.navigate_to_dashboard")
+    def test_main_vpn_lifecycle_ordering(self, mock_navigate):
+        from vpn import ConnectivityController
+
+        events = []
+        vpn_mock = MagicMock(spec=ConnectivityController)
+        vpn_mock.prepare_reauthentication.side_effect = lambda: events.append("vpn_prepare_reauthentication")
+        vpn_mock.finish_authentication.side_effect = lambda: events.append("vpn_finish_authentication")
+
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap = MagicMock()
+                mock_imap_class.return_value = mock_imap
+                with patch("main.authenticate_cmp") as mock_auth:
+                    def _fake_auth(*args, **kwargs):
+                        events.append("authenticate_cmp")
+                        hook = kwargs.get("on_otp_submitted")
+                        if hook:
+                            hook()
+                        return True
+                    mock_auth.side_effect = _fake_auth
+                    mock_navigate.side_effect = lambda *args, **kwargs: events.append("navigate_to_dashboard") or True
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        mock_monitor = MagicMock()
+                        mock_monitor.monitor_once.side_effect = KeyboardInterrupt()
+                        mock_monitor_class.return_value = mock_monitor
+
+                        import main
+                        result = main.main(env=TEST_ENV, connectivity_factory=lambda *args: vpn_mock)
+
+                        assert result == 0
+                        assert events == [
+                            "authenticate_cmp",
+                            "vpn_finish_authentication",
+                            "navigate_to_dashboard",
+                        ]
+                        mock_monitor_class.assert_called_once()
+
+    def test_main_vpn_does_not_connect_on_auth_failure(self):
+        from cmp_auth import AuthenticationError
+        from vpn import ConnectivityController
+
+        vpn_mock = MagicMock(spec=ConnectivityController)
+
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap = MagicMock()
+                mock_imap_class.return_value = mock_imap
+                with patch("main.authenticate_cmp", side_effect=AuthenticationError("Auth failed")):
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        import main
+                        result = main.main(env=TEST_ENV, connectivity_factory=lambda *args: vpn_mock)
+
+                        assert result == 1
+                        vpn_mock.prepare_reauthentication.assert_not_called()
+                        vpn_mock.finish_authentication.assert_not_called()
+                        mock_monitor_class.assert_not_called()

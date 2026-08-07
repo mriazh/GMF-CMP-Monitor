@@ -22,8 +22,12 @@ browser_state/
 artifacts/
 runtime_artifacts/
 *.log
+logs/
+/logs/
 
 # Private operational planning
+docs/
+/docs/
 /docs/PRD.md
 /PRD.md
 

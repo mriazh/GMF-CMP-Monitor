@@ -1,11 +1,10 @@
 """Tests for CMP authentication module - all offline, using dependency injection."""
 
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from datetime import datetime
 
 import pytest
 
-from config import Settings, SecretValue
+from config import SecretValue, Settings
 
 
 def make_test_settings(**overrides) -> Settings:
@@ -121,7 +120,7 @@ class FakePage:
     def fill(self, selector: str, value: str):
         self.fills[selector] = value
 
-    def click(self, selector: str, timeout: int | float | None = None):
+    def click(self, selector: str, timeout: float | None = None, **kwargs):
         self.clicks.append(selector)
         # Initial credential form submit: #fm1 input[name='submit'][type='submit']
         if selector == "#fm1 input[name='submit'][type='submit']":
@@ -326,7 +325,7 @@ class TestLoginSelectorFlow:
                 original_click(selector)
         page.click = broken_click
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
@@ -370,7 +369,7 @@ class TestDisabledInitialSubmit:
         page.set_blur_enables_submit(False)  # Portal validation never satisfies
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError, match="remained disabled"):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
@@ -485,7 +484,7 @@ class TestAlreadyAuthenticatedOrDirectRedirect:
         page.goto = goto_foreign
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
@@ -499,7 +498,7 @@ class TestAlreadyAuthenticatedOrDirectRedirect:
         page.goto = goto_port
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
@@ -513,7 +512,7 @@ class TestAlreadyAuthenticatedOrDirectRedirect:
         page.goto = goto_creds
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
@@ -527,7 +526,7 @@ class TestAlreadyAuthenticatedOrDirectRedirect:
         page.goto = goto_lookalike
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
@@ -541,7 +540,7 @@ class TestAlreadyAuthenticatedOrDirectRedirect:
         page.goto = goto_malformed
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
@@ -555,7 +554,7 @@ class TestAlreadyAuthenticatedOrDirectRedirect:
         page.goto = goto_empty_port
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
@@ -569,7 +568,7 @@ class TestAlreadyAuthenticatedOrDirectRedirect:
             def set_default_timeout(self, timeout):
                 pass
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         otp = FakeOtpProvider()
 
         with pytest.raises(AuthenticationError) as exc_info:
@@ -654,8 +653,7 @@ class TestFragmentBasedSuccessDetection:
         page = FakePage()
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp
-        from cmp_auth import AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError, match="timed out"):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
@@ -667,8 +665,7 @@ class TestFragmentBasedSuccessDetection:
         page = FakePage()
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp
-        from cmp_auth import AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError, match="timed out"):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
@@ -680,8 +677,7 @@ class TestFragmentBasedSuccessDetection:
         page = FakePage()
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp
-        from cmp_auth import AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError, match="timed out"):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
@@ -754,7 +750,7 @@ class TestOtpRejectionDetection:
 
         page.click = persistent_rejection_click
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError) as exc_info:
             authenticate_cmp(settings=settings, otp_provider=otp, page=page, clock=clock)
 
@@ -778,7 +774,7 @@ class TestOtpRejectionDetection:
 
     def test_login_or_otp_form_visible_reused(self):
         """Verify that _login_or_otp_form_visible utilizes _check_auth_form_visibility."""
-        from cmp_auth import _login_or_otp_form_visible, _check_auth_form_visibility
+        from cmp_auth import _check_auth_form_visibility, _login_or_otp_form_visible
         page = FakePage()
         page._state = "cas"
         assert _login_or_otp_form_visible(page) is True
@@ -803,7 +799,7 @@ class TestOtpRejectionDetection:
 
         page.click = persistent_rejection_click
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError) as exc_info:
             authenticate_cmp(settings=settings, otp_provider=otp, page=page, clock=clock)
 
@@ -833,7 +829,7 @@ class TestOtpRejectionDetection:
 
         page.click = persistent_rejection_click
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page, clock=clock)
 
@@ -864,7 +860,7 @@ class TestOtpRejectionDetection:
         page.click = rejecting_click
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
 
         with pytest.raises(AuthenticationError, match="OTP rejected") as exc_info:
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
@@ -892,9 +888,46 @@ class TestOtpRejectionDetection:
         page.click = rejecting_click
         otp = FakeOtpProvider()
 
-        from cmp_auth import authenticate_cmp, AuthenticationError
+        from cmp_auth import AuthenticationError, authenticate_cmp
         with pytest.raises(AuthenticationError):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
 
         # No direct navigation to the dashboard URL was triggered.
         assert all("dashboard" not in str(u) for (u, _t) in page.urls)
+
+    def test_on_otp_submitted_called_on_otp_submission(self):
+        settings = make_test_settings()
+        page = FakePage()
+        otp = FakeOtpProvider()
+        hook_called = False
+
+        def hook():
+            nonlocal hook_called
+            hook_called = True
+
+        from cmp_auth import authenticate_cmp
+
+        assert authenticate_cmp(settings=settings, otp_provider=otp, page=page, on_otp_submitted=hook) is True
+        assert hook_called is True
+
+    def test_on_otp_submitted_called_when_already_authenticated(self):
+        settings = make_test_settings()
+        page = FakePage()
+
+        def goto_products(url, timeout=None, wait_until=None):
+            page.urls.append((url, timeout))
+            page.current_url = settings.cmp_products_url
+            page._state = "products"
+
+        page.goto = goto_products
+        otp = FakeOtpProvider()
+        hook_called = False
+
+        def hook():
+            nonlocal hook_called
+            hook_called = True
+
+        from cmp_auth import authenticate_cmp
+
+        assert authenticate_cmp(settings=settings, otp_provider=otp, page=page, on_otp_submitted=hook) is True
+        assert hook_called is True

@@ -16,17 +16,26 @@ import logging
 import time
 from enum import Enum, auto
 from typing import Protocol
-from urllib.parse import urlparse, ParseResult
+from urllib.parse import ParseResult, urlparse
 
-from config import Settings, APPROVED_CMP_HOST
-from cmp_auth import authenticate_cmp, AuthenticationError
+from cmp_auth import AuthenticationError, authenticate_cmp
+from config import APPROVED_CMP_HOST, Settings
 from imap_client import OtpProviderProtocol
+
+
+class VpnLifecycleProtocol(Protocol):
+    def prepare_reauthentication(self) -> None: ...
+    def finish_authentication(self) -> None: ...
 
 log = logging.getLogger(__name__)
 
-# SPA menu selectors for the Vaadin 7 dashboard navigation.
 DASHBOARD_MENU_SELECTOR = "span.main-menu-item-caption"
 DASHBOARD_MENU_TEXT = "Dashboard"
+DASHBOARD_MENU_SELECTORS = [
+    "span.main-menu-item-caption",
+    'div.main-menu-item[role="button"]:has(span.main-menu-item-caption:has-text("Dashboard"))',
+    'span.main-menu-item-caption:has-text("Dashboard")',
+]
 # Selected-menu item and view DOM signals. These selectors are marked
 # UNVERIFIED until confirmed against the real post-click DOM during a live
 # session (see _log_dashboard_dom_diagnostics for safe selector facts).
@@ -34,6 +43,18 @@ DASHBOARD_MENU_TEXT = "Dashboard"
 # not the child caption span.
 DASHBOARD_SELECTED_SELECTOR = "div.main-menu-item.selected"
 DASHBOARD_VIEW_SELECTOR = "div.dashboard-view"
+DASHBOARD_CONTAINER_SELECTORS = (
+    "div.dashboard-view",
+    "div.v-csslayout.v-layout.v-widget.sparks.v-csslayout-sparks.v-has-width",
+    "div.sparks.v-csslayout-sparks",
+    "div.sparks",
+    ".v-csslayout-sparks",
+    ".dashboard-container",
+    ".v-dashboard",
+    '[class*="v-csslayout-sparks"]',
+    "div.v-grid",
+    '[role="grid"]',
+)
 
 # Poll interval (seconds) for state/menu/verification polls.
 POLL_INTERVAL_SECONDS = 1.0
@@ -71,12 +92,10 @@ class DashboardState(Enum):
 
 class RecoveryExhaustedError(Exception):
     """Raised when recovery attempts are exhausted."""
-    pass
 
 
 class RecoveryError(Exception):
     """Safe exception for recovery failures that sanitizes sensitive data."""
-    pass
 
 
 class AuthenticationRequiredError(RecoveryError):
@@ -85,7 +104,6 @@ class AuthenticationRequiredError(RecoveryError):
     Subclasses RecoveryError so generic recovery handlers still treat it as a
     navigation failure, while navigation callers can trigger a fresh login.
     """
-    pass
 
 
 def _is_approved_origin(parsed: ParseResult) -> bool:
@@ -181,9 +199,13 @@ def _dashboard_dom_ready(page: object) -> bool:
         selected = page.locator(DASHBOARD_SELECTED_SELECTOR, has_text=DASHBOARD_MENU_TEXT).first
         if hasattr(selected, "is_visible") and selected.is_visible():
             return True
-        container = page.locator(DASHBOARD_VIEW_SELECTOR).first
-        if hasattr(container, "is_visible") and container.is_visible():
-            return True
+        for sel in DASHBOARD_CONTAINER_SELECTORS:
+            try:
+                container = page.locator(sel).first
+                if hasattr(container, "is_visible") and container.is_visible():
+                    return True
+            except Exception:
+                pass
     except Exception:
         pass
     return False
@@ -284,15 +306,22 @@ def _visible_dashboard_menu(page: object) -> object | None:
     """Return the visible, exact-text Dashboard menu item locator or None."""
     try:
         menu = page.locator(DASHBOARD_MENU_SELECTOR, has_text=DASHBOARD_MENU_TEXT).first
-        if not hasattr(menu, "is_visible") or not menu.is_visible():
-            return None
-        # Exact-text guard: the caption must end with "Dashboard" (allowing font icon prefixes like \ue900).
-        if hasattr(menu, "inner_text"):
-            text = menu.inner_text().strip()
-            if not text.endswith(DASHBOARD_MENU_TEXT):
-                return None
-        return menu
-    except Exception:
+        if hasattr(menu, "is_visible") and menu.is_visible():
+            if hasattr(menu, "inner_text"):
+                text = menu.inner_text().strip()
+                if text.endswith(DASHBOARD_MENU_TEXT):
+                    return menu
+            else:
+                return menu
+
+        for sel in DASHBOARD_MENU_SELECTORS:
+            if sel == DASHBOARD_MENU_SELECTOR:
+                continue
+            loc = page.locator(sel).first
+            if hasattr(loc, "is_visible") and loc.is_visible():
+                return loc
+        return None
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -309,7 +338,7 @@ def _is_playwright_page(page: object) -> bool:
     return hasattr(page, "context") and hasattr(page, "goto")
 
 
-def _wait_for_vaadin_loading(page: object, clock: Clock, timeout_seconds: float) -> None:
+def _wait_for_vaadin_loading(page: object, settings: Settings, clock: Clock, timeout_seconds: float) -> None:
     """Wait for the Vaadin SPA menu to become visible before navigation polling.
 
     The Vaadin 7 shell loads asynchronously: the initial HTML (domcontentloaded)
@@ -333,11 +362,32 @@ def _wait_for_vaadin_loading(page: object, clock: Clock, timeout_seconds: float)
     )
     start_time = clock.now()
     deadline = start_time + timeout_seconds
+    last_diag_log = 0.0
+    last_reload_time = start_time
     while clock.now() < deadline:
         if _visible_dashboard_menu(page) is not None:
             elapsed = clock.now() - start_time
             log.info("Vaadin SPA menu became visible after %.1fs", elapsed)
             return
+        current_url = getattr(page, "url", "") or ""
+        now = clock.now()
+        if now - last_diag_log >= 10.0:
+            last_diag_log = now
+            try:
+                captions = page.locator("span.main-menu-item-caption").count() if hasattr(page, "locator") else 0
+                btns = page.locator("div.main-menu-item").count() if hasattr(page, "locator") else 0
+                log.info("SPA loading check: url=%s captions=%d items=%d", current_url, captions, btns)
+            except Exception:  # noqa: BLE001
+                pass
+        # If after 25s the SPA menu hasn't mounted, perform a reload of the page
+        # because the Vaadin client bootstrap script may have stalled on the initial redirect.
+        if now - last_reload_time >= 25.0:
+            last_reload_time = now
+            try:
+                log.info("SPA menu not loaded yet; performing reload of products page (attempting mount recovery)")
+                page.reload(timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
+            except Exception:  # noqa: BLE001
+                pass
         clock.sleep(POLL_INTERVAL_SECONDS)
     elapsed = clock.now() - start_time
     log.error(
@@ -366,10 +416,11 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
     # Pre-wait: the Vaadin 7 SPA shell may take up to 90s to fully load and
     # render the menu items. Poll for the menu to appear (or the v-app-loading
     # indicator to disappear) before starting the main navigation deadline.
-    _wait_for_vaadin_loading(page, clock, VAADIN_BOOTSTRAP_TIMEOUT_SECONDS)
+    _wait_for_vaadin_loading(page, settings, clock, VAADIN_BOOTSTRAP_TIMEOUT_SECONDS)
     navigation_timeout_seconds = settings.navigation_timeout_ms / 1000.0
     deadline = clock.now() + navigation_timeout_seconds
     clicked = False
+    clicked_time = 0.0
     left_products_seen = False
     menu_attempts = 0
     click_failed = False
@@ -401,7 +452,7 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
             if state != DashboardState.PRODUCTS:
                 # The route moved away from Products: the click was consumed.
                 left_products_seen = True
-                log.debug("Menu click in flight; route left products (state=%s)", state.name)
+                log.info("Menu click in flight; route left products (state=%s)", state.name)
             else:
                 can_retry = left_products_seen
                 if not can_retry:
@@ -428,9 +479,14 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
                 _log_dashboard_dom_diagnostics(page)
                 last_diag_time = now
                 diag_count += 1
+                dom_stat = _dashboard_dom_ready(page)
+                try:
+                    hash_val = page.evaluate("window.location.hash") if hasattr(page, "evaluate") else "?"
+                except Exception:  # noqa: BLE001
+                    hash_val = "?"
                 log.debug(
-                    "Dashboard unverified after click (poll %d): state=%s",
-                    diag_count, state.name,
+                    "Dashboard unverified after click (poll %d): state=%s hash=%s dom_ready=%s",
+                    diag_count, state.name, hash_val, dom_stat,
                 )
             clock.sleep(POLL_INTERVAL_SECONDS)
             continue
@@ -451,6 +507,7 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
             menu.click(timeout=remaining_timeout_ms, no_wait_after=True)
             menu_attempts += 1
             clicked = True
+            clicked_time = clock.now()
             click_failed = False
             left_products_seen = False
         except Exception:
@@ -485,18 +542,20 @@ def navigate_to_dashboard(
         raise AuthenticationRequiredError(
             "Authentication required during dashboard navigation"
         )
-    if state == DashboardState.UNKNOWN or (
+    if state in (DashboardState.UNKNOWN, DashboardState.PRODUCTS) or (
         state == DashboardState.DASHBOARD and not _is_verified_dashboard(page)
     ):
-        log.info("Unverified dashboard or unknown state; navigating to products to load the SPA shell")
-        try:
-            page.goto(
-                settings.cmp_products_url,
-                timeout=settings.navigation_timeout_ms,
-                wait_until="domcontentloaded",
-            )
-        except Exception as nav_exc:
-            raise RecoveryError("Dashboard navigation failed") from nav_exc
+        current_url = getattr(page, "url", "") or ""
+        if "#!products" not in current_url:
+            log.info("Unverified dashboard or unknown state; navigating to products to load the SPA shell (current: %s)", current_url)
+            try:
+                page.goto(
+                    settings.cmp_products_url,
+                    timeout=settings.navigation_timeout_ms,
+                    wait_until="domcontentloaded",
+                )
+            except Exception as nav_exc:
+                raise RecoveryError("Dashboard navigation failed") from nav_exc
 
     return _click_dashboard_menu(page, settings, clock)
 
@@ -510,11 +569,18 @@ class ContinuousMonitor:
         page: object,
         otp_provider: OtpProviderProtocol,
         clock: Clock | None = None,
+        vpn_manager: VpnLifecycleProtocol | None = None,
+        *,
+        before_relogin: Callable[[], None] | None = None,
+        after_relogin: Callable[[], None] | None = None,
     ) -> None:
         self._settings = settings
         self._page = page
         self._otp_provider = otp_provider
         self._clock = clock or SystemClock()
+        self._vpn_manager = vpn_manager
+        self._before_relogin = before_relogin
+        self._after_relogin = after_relogin
         self._consecutive_recoveries = 0
 
     def _recover_to_dashboard(self) -> bool:
@@ -532,6 +598,15 @@ class ContinuousMonitor:
             log.info("Waiting %.0fs before recovery attempt (%d/%d)",
                      backoff, self._consecutive_recoveries, self._settings.recovery_retry_limit)
             self._clock.sleep(backoff)
+
+            # For real browsers, reload the page to clear any dead session overlay,
+            # connection error, or hung Vaadin client RPC before retrying navigation.
+            if _is_playwright_page(self._page):
+                try:
+                    log.info("Reloading page to clear any dead session overlay or hung Vaadin state before recovery attempt")
+                    self._page.reload(timeout=self._settings.navigation_timeout_ms, wait_until="domcontentloaded")
+                except Exception as reload_exc:  # noqa: BLE001
+                    log.warning("Recovery page reload non-fatal error: %s", type(reload_exc).__name__)
 
             # Try to navigate back to dashboard via the real SPA menu click.
             try:
@@ -833,14 +908,20 @@ class ContinuousMonitor:
         return self._recover_to_dashboard()
 
     def _perform_relogin(self) -> None:
-        """Perform full re-authentication flow.
+        """Perform full re-authentication flow with WARP and route management.
 
-        authenticate_cmp records a fresh login attempt timestamp (via the
-        injected clock and configured timezone), obtains a new OTP, and
-        completes the full CAS login flow, finishing on the products page.
-        We then click the real SPA Dashboard menu to reach the dashboard.
+        1. Turns WARP off before re-authentication and restores office/IMAP route.
+        2. Requests OTP and completes CAS authentication.
+        3. Navigates to dashboard and verifies ready-state.
+        4. Turns WARP on after reaching ready-state.
         """
+        if self._before_relogin is not None:
+            self._before_relogin()
+        if self._vpn_manager is not None:
+            self._vpn_manager.prepare_reauthentication()
+
         log.info("Requesting new OTP for re-authentication")
+
         authenticate_cmp(
             settings=self._settings,
             otp_provider=self._otp_provider,
@@ -848,10 +929,27 @@ class ContinuousMonitor:
             clock=self._clock,
         )
 
+        if self._after_relogin is not None:
+            self._after_relogin()
+        if self._vpn_manager is not None:
+            self._vpn_manager.finish_authentication()
+
         # Navigate back to dashboard via the real SPA menu click (never a
         # direct goto to #!dashboard).
-        navigate_to_dashboard(self._page, self._settings, self._clock)
+        nav_success = navigate_to_dashboard(self._page, self._settings, self._clock)
+        if not nav_success:
+            raise RecoveryError("Dashboard navigation failed to verify ready-state")
         log.info("Re-authentication successful, navigated to dashboard")
+
+    def manual_retry(self) -> bool:
+        """Perform a manual retry / re-authentication after ready-state.
+
+        Turns WARP off before re-authentication, restores office/IMAP route,
+        completes OTP authentication, navigates to dashboard ready-state, and
+        turns WARP on after reaching ready-state.
+        """
+        log.info("Starting manual retry after ready-state")
+        return self._relogin_and_navigate()
 
     def _relogin_and_navigate(self) -> bool:
         """Re-authenticate and navigate to the verified dashboard."""

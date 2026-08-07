@@ -7,11 +7,12 @@ clicked. Delayed route transitions (post-reload resets to products, menu
 click bounces) are modelled with scheduled transitions.
 """
 
-import pytest
 from datetime import datetime
 from urllib.parse import urlparse
 
-from config import Settings, SecretValue
+import pytest
+
+from config import SecretValue, Settings
 
 
 def make_test_settings(**overrides) -> Settings:
@@ -475,86 +476,86 @@ class VaadinBootingFakePage(FakePage):
 
 class TestDashboardStateClassification:
     def test_dashboard_url(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
         assert classify_state(page) == DashboardState.DASHBOARD
 
     def test_products_url(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
         assert classify_state(page) == DashboardState.PRODUCTS
 
     def test_cas_login_url(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
         assert classify_state(page) == DashboardState.AUTH_EXPIRED
 
     def test_unknown_url(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://example.com")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_foreign_host_dashboard_lookalike_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         # Foreign host with dashboard fragment should be UNKNOWN
         page = FakePage("https://evil.example.com/#!dashboard")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_foreign_host_products_lookalike_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         # Foreign host with products fragment should be UNKNOWN
         page = FakePage("https://evil.example.com/#!products")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_http_lookalike_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         # HTTP instead of HTTPS should be UNKNOWN
         page = FakePage("http://ep.iotcc.telkomsel.com/#!dashboard")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_http_products_lookalike_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("http://ep.iotcc.telkomsel.com/#!products")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_malformed_url_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         # Malformed URL should be UNKNOWN
         page = FakePage("not-a-url")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_approved_host_wrong_fragment_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         # Approved host but wrong fragment
         page = FakePage("https://ep.iotcc.telkomsel.com/#!other")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_cas_logout_path_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/logout")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_cas_service_validate_path_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/serviceValidate")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_cas_path_without_login_form_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         # CAS path without visible login form or OTP form should be UNKNOWN
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/oauth2/authorize")
         # The fake page won't have login form or OTP form visible on this path
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_cas_login_with_visible_login_form_is_auth_expired(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         # CAS login page with visible username/password form should be AUTH_EXPIRED
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
         # FakePage sets #username and #password visible for cas/login
         assert classify_state(page) == DashboardState.AUTH_EXPIRED
 
     def test_cas_with_visible_otp_form_is_auth_expired(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         # CAS page with visible OTP form (#token) should be AUTH_EXPIRED
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
         # Manually set #token visible and hide username/password
@@ -564,73 +565,73 @@ class TestDashboardStateClassification:
         assert classify_state(page) == DashboardState.AUTH_EXPIRED
 
     def test_session_closed_path_is_auth_expired(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         # Session-closed endpoint on the approved host triggers auto-relogin
         page = FakePage("https://ep.iotcc.telkomsel.com/session-closed?locale=en")
         assert classify_state(page) == DashboardState.AUTH_EXPIRED
 
     def test_cas_login_without_form_is_auth_expired(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
         page._locator_visible["#username"] = False
         page._locator_visible["#password"] = False
         assert classify_state(page) == DashboardState.AUTH_EXPIRED
 
     def test_cas_login_with_query_params_is_auth_expired(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/login/?service=foo")
         assert classify_state(page) == DashboardState.AUTH_EXPIRED
 
     def test_session_closed_slash_with_query_params_is_auth_expired(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/session-closed/?locale=en")
         assert classify_state(page) == DashboardState.AUTH_EXPIRED
 
     def test_session_closed_extra_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/session-closed-extra")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_foreign_host_cas_login_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://evil-ep.iotcc.telkomsel.com/cas/login")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_http_cas_login_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("http://ep.iotcc.telkomsel.com/cas/login")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_auth_path_with_misleading_fragment_is_auth_expired(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/login#!dashboard")
         assert classify_state(page) == DashboardState.AUTH_EXPIRED
         page2 = FakePage("https://ep.iotcc.telkomsel.com/session-closed#!products")
         assert classify_state(page2) == DashboardState.AUTH_EXPIRED
 
     def test_foreign_host_session_closed_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         # Foreign-host session-closed lookalike must stay UNKNOWN (strict host check)
         page = FakePage("https://evil.example.com/session-closed?locale=en")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_non_default_port_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com:8443/#!dashboard")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_embedded_credentials_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://user:pass@ep.iotcc.telkomsel.com/#!dashboard")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_subdomain_lookalike_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com.evil.example/#!dashboard")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_page_url_exception_returns_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
 
         class ClosedPage:
             @property
@@ -640,17 +641,17 @@ class TestDashboardStateClassification:
         assert classify_state(ClosedPage()) == DashboardState.UNKNOWN
 
     def test_malformed_port_products_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com:notaport/#!products")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_malformed_port_cas_login_is_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com:notaport/cas/login")
         assert classify_state(page) == DashboardState.UNKNOWN
 
     def test_empty_port_urls_are_unknown(self):
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         assert classify_state(FakePage("https://ep.iotcc.telkomsel.com:/#!products")) == DashboardState.UNKNOWN
         assert classify_state(FakePage("https://ep.iotcc.telkomsel.com:/#!dashboard")) == DashboardState.UNKNOWN
         assert classify_state(FakePage("https://ep.iotcc.telkomsel.com:/cas/login")) == DashboardState.UNKNOWN
@@ -661,7 +662,7 @@ class TestVerifiedDashboard:
     """The real dashboard verifier requires URL + hash + DOM together."""
 
     def test_requires_url_hash_and_dom(self):
-        from dashboard_monitor import _is_verified_dashboard, _dashboard_dom_ready
+        from dashboard_monitor import _dashboard_dom_ready, _is_verified_dashboard
         # URL and hash correct but DOM not ready -> not verified
         page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
         page.set_dashboard_ready(False)
@@ -1068,8 +1069,8 @@ class TestSessionExpiryTriggeringReLogin:
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
         page.set_menu_visible(True)
 
-        from cmp_auth import AuthenticationError
         import dashboard_monitor
+        from cmp_auth import AuthenticationError
         from dashboard_monitor import ContinuousMonitor
 
         otp_provider = FakeOtpProvider()
@@ -1101,8 +1102,8 @@ class TestSessionExpiryTriggeringReLogin:
         page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
         page.set_menu_visible(True)
 
-        from cmp_auth import AuthenticationError
         import dashboard_monitor
+        from cmp_auth import AuthenticationError
         from dashboard_monitor import ContinuousMonitor, RecoveryExhaustedError
 
         otp_provider = FakeOtpProvider()
@@ -1243,7 +1244,10 @@ class TestUnknownUrlHandling:
             raise RuntimeError("Navigation failed")
         page.goto = failing_goto
 
-        from dashboard_monitor import ContinuousMonitor, RecoveryError, RecoveryExhaustedError
+        from dashboard_monitor import (
+            ContinuousMonitor,
+            RecoveryExhaustedError,
+        )
         otp_provider = FakeOtpProvider()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
@@ -1262,7 +1266,10 @@ class TestUnknownUrlHandling:
             page._navigations.append(url)
         page.goto = goto_wrong_url
 
-        from dashboard_monitor import ContinuousMonitor, RecoveryError, RecoveryExhaustedError
+        from dashboard_monitor import (
+            ContinuousMonitor,
+            RecoveryExhaustedError,
+        )
         otp_provider = FakeOtpProvider()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=FakeClock())
 
@@ -1408,7 +1415,10 @@ class TestDashboardReloadRecovery:
         page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
         page.set_menu_visible(True)
 
-        from dashboard_monitor import ContinuousMonitor, RecoveryError, RecoveryExhaustedError
+        from dashboard_monitor import (
+            ContinuousMonitor,
+            RecoveryError,
+        )
         otp_provider = FakeOtpProvider()
         clock = FakeClock()
         monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=clock)
@@ -1428,6 +1438,7 @@ class TestDashboardReloadRecovery:
     def test_distinguish_recovery_from_relogin_logs(self, caplog):
         """Verify that dashboard recovery logs distinguish recovery from re-authentication."""
         import logging
+
         from dashboard_monitor import ContinuousMonitor
         caplog.set_level(logging.INFO)
         settings = make_test_settings()
@@ -1584,7 +1595,7 @@ class TestDashboardMenuNavigation:
 
     def test_navigate_to_dashboard_menu_never_visible_raises(self):
         """If the menu never renders, navigation must fail instead of goto dashboard."""
-        from dashboard_monitor import navigate_to_dashboard, RecoveryError
+        from dashboard_monitor import RecoveryError, navigate_to_dashboard
 
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
@@ -1642,7 +1653,7 @@ class TestDashboardMenuNavigation:
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
 
-        from dashboard_monitor import navigate_to_dashboard, RecoveryError
+        from dashboard_monitor import RecoveryError, navigate_to_dashboard
         with pytest.raises(RecoveryError):
             navigate_to_dashboard(page, settings, FakeClock())
         assert page.goto_calls == []
@@ -1708,6 +1719,7 @@ class TestDashboardVerification:
     def test_no_production_path_calls_goto_dashboard_url(self):
         """No production path may navigate directly to the dashboard URL."""
         import inspect
+
         import dashboard_monitor
 
         src = inspect.getsource(dashboard_monitor)
@@ -1810,7 +1822,7 @@ class TestDashboardVerification:
         """
         import logging
 
-        from dashboard_monitor import navigate_to_dashboard, RecoveryError
+        from dashboard_monitor import RecoveryError, navigate_to_dashboard
 
         settings = make_test_settings()
         page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
@@ -1819,9 +1831,8 @@ class TestDashboardVerification:
         # navigation timeout: the URL/hash/DOM stay on Products after the click.
         page.set_click_transition_delay(100000)
 
-        with caplog.at_level(logging.DEBUG):
-            with pytest.raises(RecoveryError):
-                navigate_to_dashboard(page, settings, FakeClock())
+        with caplog.at_level(logging.DEBUG), pytest.raises(RecoveryError):
+            navigate_to_dashboard(page, settings, FakeClock())
 
         assert "Dashboard unverified after click" in caplog.text
         assert "Dashboard DOM diagnostics" in caplog.text
@@ -2158,14 +2169,14 @@ class TestLiveFragmentVerification:
 
     def test_classify_state_uses_live_hash_when_url_lags(self):
         """classify_state returns DASHBOARD when page.url fragment is !products but live hash is #!dashboard."""
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
         page.set_hash("#!dashboard")  # Live hash is dashboard, URL lags
         assert classify_state(page) == DashboardState.DASHBOARD
 
     def test_classify_state_products_when_both_url_and_hash_agree(self):
         """classify_state returns PRODUCTS when both URL and live hash are #!products."""
-        from dashboard_monitor import classify_state, DashboardState
+        from dashboard_monitor import DashboardState, classify_state
         page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
         page.set_hash("#!products")
         assert classify_state(page) == DashboardState.PRODUCTS
@@ -2257,7 +2268,11 @@ class TestLiveFragmentVerification:
         should not fall back to the stale page.url fragment.
         Also verifies _is_verified_dashboard is False even when DOM is ready.
         """
-        from dashboard_monitor import classify_state, DashboardState, _is_verified_dashboard
+        from dashboard_monitor import (
+            DashboardState,
+            _is_verified_dashboard,
+            classify_state,
+        )
         page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
         page.set_hash("")  # Live hash is empty (authoritative)
         page.set_dashboard_ready(True)  # DOM is ready
@@ -2274,7 +2289,12 @@ class TestLiveFragmentVerification:
         and that no raw exception text is exposed through public behavior or logs.
         """
         import logging
-        from dashboard_monitor import classify_state, DashboardState, _is_verified_dashboard
+
+        from dashboard_monitor import (
+            DashboardState,
+            _is_verified_dashboard,
+            classify_state,
+        )
 
         raw_message = "Target page, context or browser has been closed: SECRET_RAW_ERROR"
 
@@ -2304,7 +2324,11 @@ class TestLiveFragmentVerification:
         (no fragment) while window.location.hash is already #!dashboard.
         Also verifies _is_verified_dashboard is True when DOM is ready.
         """
-        from dashboard_monitor import classify_state, DashboardState, _is_verified_dashboard
+        from dashboard_monitor import (
+            DashboardState,
+            _is_verified_dashboard,
+            classify_state,
+        )
         page = FakePage("https://ep.iotcc.telkomsel.com/")  # No fragment
         page.set_hash("#!dashboard")  # Live hash is dashboard
         page.set_dashboard_ready(True)  # DOM is ready
