@@ -349,7 +349,7 @@ class TestSecretPathProtection:
 
 
 class TestMandatoryTls:
-    def test_tls_verification_cannot_be_disabled(self):
+    def test_tls_verification_can_be_disabled(self):
         env = {
             "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
             "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
@@ -360,8 +360,21 @@ class TestMandatoryTls:
             "IMAP_PASSWORD": "imappass",
             "IMAP_VERIFY_TLS": "false",
         }
-        with pytest.raises(ConfigError, match="IMAP_VERIFY_TLS"):
-            load_settings(env=env)
+        settings = load_settings(env=env)
+        assert settings.imap_verify_tls is False
+
+    def test_tls_verification_defaults_to_true(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+        }
+        settings = load_settings(env=env)
+        assert settings.imap_verify_tls is True
 
 
 class TestSecretRedaction:
@@ -767,10 +780,10 @@ class TestOptionalValueTrimming:
             "CMP_PASSWORD": "testpass",
             "IMAP_USERNAME": "imapuser",
             "IMAP_PASSWORD": "imappass",
-            "IMAP_HOST": "  mail.gmf-aeroasia.co.id  ",
+            "IMAP_HOST": "  mail.company.local  ",
         }
         settings = load_settings(env=env)
-        assert settings.imap_host == "mail.gmf-aeroasia.co.id"
+        assert settings.imap_host == "mail.company.local"
 
     def test_imap_mailbox_trimmed(self):
         env = {
@@ -928,4 +941,123 @@ class TestImapMailboxValidation:
             "IMAP_MAILBOX": "   ",
         }
         with pytest.raises(ConfigError, match="IMAP_MAILBOX must not be empty"):
+            load_settings(env=env)
+
+
+class TestPageZoomPercentValidation:
+    """Tests for PAGE_ZOOM_PERCENT configuration."""
+
+    def test_default_page_zoom_percent_is_67(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+        }
+        settings = load_settings(env=env)
+        assert settings.page_zoom_percent == 67
+
+    def test_custom_page_zoom_percent_accepted(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "PAGE_ZOOM_PERCENT": "75",
+        }
+        settings = load_settings(env=env)
+        assert settings.page_zoom_percent == 75
+
+    def test_out_of_range_page_zoom_percent_rejected(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "PAGE_ZOOM_PERCENT": "10",
+        }
+        with pytest.raises(ConfigError, match="PAGE_ZOOM_PERCENT must be between 25 and 200"):
+            load_settings(env=env)
+
+
+class TestWarpModeValidation:
+    """Tests for WARP_MODE and WARP_PROXY_PORT configuration."""
+
+    def test_default_warp_mode_is_proxy_and_port_is_40000(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+        }
+        settings = load_settings(env=env)
+        assert settings.warp_mode == "proxy"
+        assert settings.warp_proxy_port == 40000
+
+    def test_legacy_warp_mode_accepted(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "WARP_MODE": "warp",
+        }
+        settings = load_settings(env=env)
+        assert settings.warp_mode == "warp"
+
+    def test_custom_warp_proxy_port_accepted(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "WARP_PROXY_PORT": "10800",
+        }
+        settings = load_settings(env=env)
+        assert settings.warp_proxy_port == 10800
+
+    def test_invalid_warp_mode_rejected(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "WARP_MODE": "doh",
+        }
+        with pytest.raises(ConfigError, match="WARP_MODE must be warp or proxy"):
+            load_settings(env=env)
+
+    def test_invalid_warp_proxy_port_rejected(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "WARP_PROXY_PORT": "80",
+        }
+        with pytest.raises(ConfigError, match="WARP_PROXY_PORT must be between 1024 and 65535"):
             load_settings(env=env)

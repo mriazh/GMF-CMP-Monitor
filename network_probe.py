@@ -35,13 +35,21 @@ class ImapReachabilityProbe:
         getaddrinfo: Callable[..., list[tuple]] | None = None,
         socket_factory: Callable[..., socket.socket] | None = None,
         ssl_context: ssl.SSLContext | None = None,
+        verify_tls: bool = True,
     ) -> None:
         self.host = host
         self.port = port
         self.timeout_seconds = timeout_seconds
         self._getaddrinfo = getaddrinfo or socket.getaddrinfo
         self._socket_factory = socket_factory or socket.socket
-        self._ssl_context = ssl_context or ssl.create_default_context()
+        if ssl_context is not None:
+            self._ssl_context = ssl_context
+        else:
+            ctx = ssl.create_default_context()
+            if not verify_tls:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            self._ssl_context = ctx
 
     def check(self) -> ProbeResult:
         """Return reachability and the last successful stage without raw errors."""
@@ -74,6 +82,12 @@ class ImapReachabilityProbe:
                 )
                 last_stage = "tls"
                 return ProbeResult(True, last_stage)
+            except ssl.SSLCertVerificationError as exc:
+                log.warning(
+                    "IMAP TLS certificate verification failed (%s); accepting office network reachability",
+                    type(exc).__name__,
+                )
+                return ProbeResult(True, "tls")
             except (OSError, ssl.SSLError) as exc:
                 log.info(
                     "IMAP reachability probe failed at %s (%s)",

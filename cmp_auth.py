@@ -399,6 +399,51 @@ def _wait_for_products_page(
                             wait_until="domcontentloaded",
                         )
                         continue
+                    if (
+                        "acceptable usage policy" in title.lower()
+                        or "acceptable use policy" in title.lower()
+                        or "policy view" in title.lower()
+                    ):
+                        log.info("CAS presented Acceptable Usage Policy ('%s'); accepting terms", title.strip())
+                        try:
+                            if hasattr(page, "locator"):
+                                cb = page.locator("input[type='checkbox']").first
+                                if hasattr(cb, "is_visible") and cb.is_visible() and hasattr(cb, "is_checked") and not cb.is_checked():
+                                    cb.check(timeout=3000)
+                        except Exception:
+                            pass
+                        aup_clicked = False
+                        for btn_sel in (
+                            "#fm1 input[type='submit']",
+                            "input[name='submit']",
+                            "input[name='_eventId_submit']",
+                            "input[type='submit']",
+                            "button[type='submit']",
+                            "button:has-text('Accept')",
+                            "input[value*='Accept']",
+                            "button:has-text('Agree')",
+                            "input[value*='Agree']",
+                            "button:has-text('Continue')",
+                            "input[value*='Continue']",
+                        ):
+                            try:
+                                if hasattr(page, "locator"):
+                                    btn = page.locator(btn_sel).first
+                                    if hasattr(btn, "is_visible") and btn.is_visible():
+                                        btn.click(timeout=5000, no_wait_after=True)
+                                        log.info("Clicked AUP submit button (%s)", btn_sel)
+                                        aup_clicked = True
+                                        clock.sleep(2.0)
+                                        break
+                                elif hasattr(page, "click"):
+                                    page.click(btn_sel)
+                                    aup_clicked = True
+                                    clock.sleep(2.0)
+                                    break
+                            except Exception:
+                                pass
+                        if aup_clicked:
+                            continue
                 except Exception:  # noqa: BLE001
                     pass
 

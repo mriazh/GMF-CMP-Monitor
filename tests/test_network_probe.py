@@ -90,3 +90,30 @@ def test_probe_returns_false_when_tcp_fails():
     assert result.reachable is False
     assert result.stage == "dns"
     assert ("close",) in calls
+
+
+def test_probe_returns_true_on_ssl_cert_verification_error():
+    import ssl
+
+    calls: list[tuple] = []
+    raw = FakeSocket(calls)
+
+    class CertErrorContext:
+        def wrap_socket(self, sock, server_hostname):
+            calls.append(("tls_cert_error", server_hostname))
+            raise ssl.SSLCertVerificationError("certificate verify failed: self-signed certificate")
+
+    result = ImapReachabilityProbe(
+        "mail.example.test",
+        993,
+        10,
+        getaddrinfo=lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("mail.example.test", 993))
+        ],
+        socket_factory=lambda *args: raw,
+        ssl_context=CertErrorContext(),
+    ).check()
+
+    assert result.reachable is True
+    assert result.stage == "tls"
+    assert ("tls_cert_error", "mail.example.test") in calls

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import subprocess
 import time
 from collections.abc import Callable, Sequence
@@ -116,6 +117,17 @@ def parse_checkpoint_status(output: str, site: str) -> CheckPointStatus:
     return CheckPointStatus(site=site, connected=status in {"connected", "active"})
 
 
+def _normalize_mode(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    cleaned = raw.strip().lower()
+    if cleaned in {"proxy", "warpproxy"}:
+        return "proxy"
+    if cleaned in {"warp", "full"}:
+        return "warp"
+    return cleaned
+
+
 def parse_warp_status(output: str) -> WarpStatus:
     """Parse WARP status output, accepting current and JSON forms."""
     normalized = output.lower()
@@ -134,7 +146,7 @@ def parse_warp_status(output: str) -> WarpStatus:
     if isinstance(parsed, dict):
         raw_mode = parsed.get("mode")
         if isinstance(raw_mode, str):
-            mode = raw_mode.strip().lower()
+            mode = _normalize_mode(raw_mode)
         raw_status = parsed.get("status")
         if isinstance(raw_status, str):
             connected = raw_status.strip().lower() == "connected"
@@ -142,7 +154,8 @@ def parse_warp_status(output: str) -> WarpStatus:
         for line in output.splitlines():
             stripped = line.strip().lower()
             if stripped.startswith("mode:"):
-                mode = stripped.split(":", 1)[1].strip()
+                raw_mode = stripped.split(":", 1)[1].strip()
+                mode = _normalize_mode(raw_mode.split()[0] if raw_mode else None)
                 break
     return WarpStatus(connected=connected, mode=mode)
 
@@ -315,7 +328,7 @@ class WarpClient:
                     if "mode:" in stripped:
                         val = stripped.split("mode:", 1)[1].strip()
                         if val:
-                            return val.split()[0].strip()
+                            return _normalize_mode(val.split()[0].strip())
         except Exception:  # noqa: BLE001, S110
             pass
         return None
@@ -343,11 +356,25 @@ class WarpClient:
                 raise WarpValidationError("WARP is connected in an unsupported mode")
             if not self.settings.warp_reuse_existing:
                 raise WarpError("WARP is already connected")
-            self.owned = False
+            if not getattr(self, "owned", False):
+                self.owned = False
             return
         last_error: WarpError | None = None
         for attempt in range(1, self.settings.warp_retry_limit + 1):
             try:
+                if self.settings.warp_mode.lower() == "proxy":
+                    _run_command(
+                        self.executable,
+                        ["mode", "proxy"],
+                        self.settings.warp_connect_timeout_seconds,
+                        self._runner,
+                    )
+                    _run_command(
+                        self.executable,
+                        ["proxy", "port", str(self.settings.warp_proxy_port)],
+                        self.settings.warp_connect_timeout_seconds,
+                        self._runner,
+                    )
                 result = _run_command(
                     self.executable,
                     ["connect"],
@@ -380,32 +407,80 @@ class WarpClient:
                 raise WarpError("WARP connection timed out")
             self._sleep(self.settings.warp_status_poll_interval_seconds)
 
+    def _validate_socks5_proxy(self) -> str:
+        port = self.settings.warp_proxy_port
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.settings.warp_trace_timeout_seconds)
+            sock.connect(("127.0.0.1", port))
+            sock.sendall(b"\x05\x01\x00")
+            resp = sock.recv(2)
+            if resp != b"\x05\x00":
+                raise WarpValidationError(f"SOCKS5 proxy handshake rejected: {resp!r}")
+
+            domain = b"www.cloudflare.com"
+            connect_req = b"\x05\x01\x00\x03" + bytes([len(domain)]) + domain + (80).to_bytes(2, "big")
+            sock.sendall(connect_req)
+            connect_resp = sock.recv(10)
+            if len(connect_resp) < 2 or connect_resp[1] != 0:
+                raise WarpValidationError("SOCKS5 proxy connection to Cloudflare failed")
+
+            sock.sendall(
+                b"GET /cdn-cgi/trace HTTP/1.1\r\n"
+                b"Host: www.cloudflare.com\r\n"
+                b"User-Agent: GMF-CMP-Monitor/1.0\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            raw = b""
+            while True:
+                chunk = sock.recv(1024)
+                if not chunk:
+                    break
+                raw += chunk
+            return raw.decode("utf-8", errors="replace")
+        except WarpValidationError:
+            raise
+        except Exception as exc:
+            raise WarpValidationError("WARP SOCKS5 trace validation failed") from exc
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
     def validate(self) -> None:
         status = self.wait_until_connected()
         expected_mode = self.settings.warp_mode.lower()
         if status.mode != expected_mode:
-            raise WarpValidationError("WARP is not in full-tunnel mode")
+            raise WarpValidationError(f"WARP is not in {expected_mode} mode")
         trace_url = self.settings.warp_trace_url
         parsed = urlparse(trace_url)
         if parsed.scheme != "https" or parsed.hostname not in {"cloudflare.com", "www.cloudflare.com"}:
             raise WarpValidationError("WARP trace URL is not approved")
-        request = Request(trace_url, method="GET")
-        try:
-            with self._opener(request, timeout=self.settings.warp_trace_timeout_seconds) as response:
-                if getattr(response, "status", 200) < 200 or getattr(response, "status", 200) >= 300:
-                    raise WarpValidationError("WARP trace validation failed")
-                body = response.read().decode("utf-8", errors="replace")
-        except WarpValidationError:
-            raise
-        except Exception as exc:
-            raise WarpValidationError("WARP trace validation failed") from exc
+
+        if expected_mode == "proxy":
+            body = self._validate_socks5_proxy()
+        else:
+            request = Request(trace_url, method="GET")
+            try:
+                with self._opener(request, timeout=self.settings.warp_trace_timeout_seconds) as response:
+                    if getattr(response, "status", 200) < 200 or getattr(response, "status", 200) >= 300:
+                        raise WarpValidationError("WARP trace validation failed")
+                    body = response.read().decode("utf-8", errors="replace")
+            except WarpValidationError:
+                raise
+            except Exception as exc:
+                raise WarpValidationError("WARP trace validation failed") from exc
+
         fields = dict(
             line.split("=", 1)
             for line in body.splitlines()
             if "=" in line
         )
         if fields.get("warp", "").strip().lower() not in {"on", "plus"}:
-            raise WarpValidationError("WARP trace did not confirm full tunnel")
+            raise WarpValidationError("WARP trace did not confirm tunnel")
 
     def disconnect(self) -> None:
         if not self.owned or not self.settings.warp_disconnect_on_exit:
@@ -483,8 +558,13 @@ class ConnectivityController:
         self.checkpoint.disconnect()
 
     def prepare_reauthentication(self) -> None:
-        if getattr(self.warp, "owned", False):
+        if getattr(self.warp, "owned", False) and getattr(self.settings, "warp_mode", "warp").lower() != "proxy":
             self.warp.disconnect()
+            self._sleep(max(2.0, self.settings.warp_status_poll_interval_seconds))
+            for _ in range(3):
+                if self.probe.is_reachable():
+                    return
+                self._sleep(self.settings.warp_status_poll_interval_seconds)
         self.ensure_imap_reachable()
 
     def restart_auth_connectivity(self) -> None:

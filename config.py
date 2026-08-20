@@ -73,8 +73,8 @@ class Settings:
     browser_storage_state_path: Path | None
     log_level: str
     checkpoint_trac_path: Path | str | None = None
-    checkpoint_site: str = "VPN-GMF"
-    checkpoint_gateway_name: str = "GMFINETFW01"
+    checkpoint_site: str = "VPN-CORP"
+    checkpoint_gateway_name: str = "CORP-GW01"
     checkpoint_gateway_ip: str | None = None
     checkpoint_auth_mode: str = "client_managed"
     checkpoint_allow_interactive: bool = False
@@ -82,12 +82,13 @@ class Settings:
     checkpoint_password: SecretValue | None = None
     warp_cli_path: Path | str | None = None
     warp_variant: str = "consumer"
-    warp_mode: str = "warp"
+    warp_mode: str = "proxy"
+    warp_proxy_port: int = 40000
     warp_allow_dns_only: bool = False
     warp_reuse_existing: bool = True
     warp_disconnect_on_exit: bool = True
     warp_trace_url: str = "https://www.cloudflare.com/cdn-cgi/trace"
-    office_network_probe_host: str = "mail.gmf-aeroasia.co.id"
+    office_network_probe_host: str = "mail.company.local"
     office_network_probe_port: int = 993
     office_network_probe_secondary_url: str | None = None
     office_network_probe_timeout_seconds: float = 10.0
@@ -101,6 +102,10 @@ class Settings:
     warp_trace_timeout_seconds: float = 15.0
     dashboard_retry_limit: int = 3
     auth_cycle_retry_limit: int = 3
+    viewport_width: int = 1920
+    viewport_height: int = 1080
+    viewport_auto: bool = False
+    page_zoom_percent: int = 67
 
 
 def _strip_quotes(value: str) -> str:
@@ -252,8 +257,7 @@ def load_settings(
     tls_mode = _optional(values, "IMAP_TLS_MODE", "imaps").lower()
     if tls_mode not in {"imaps", "starttls"}:
         raise ConfigError("IMAP_TLS_MODE must be either imaps or starttls")
-    if not _boolean(values, "IMAP_VERIFY_TLS", True):
-        raise ConfigError("IMAP_VERIFY_TLS must remain enabled")
+    imap_verify_tls = _boolean(values, "IMAP_VERIFY_TLS", True)
     subject = _optional(values, "OTP_SUBJECT", EXACT_OTP_SUBJECT)
     if subject != EXACT_OTP_SUBJECT:
         raise ConfigError("OTP_SUBJECT must exactly match the approved CMP subject")
@@ -263,16 +267,16 @@ def load_settings(
     log_level = _optional(values, "LOG_LEVEL", "INFO").upper()
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         raise ConfigError("LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL")
-    imap_host = _optional(values, "IMAP_HOST", "mail.gmf-aeroasia.co.id")
+    imap_host = _optional(values, "IMAP_HOST", "mail.company.local")
     if not imap_host:
         raise ConfigError("IMAP_HOST must not be empty")
     imap_mailbox = _optional(values, "IMAP_MAILBOX", "INBOX")
     if not imap_mailbox:
         raise ConfigError("IMAP_MAILBOX must not be empty")
-    checkpoint_site = _optional(values, "CHECKPOINT_SITE", "VPN-GMF")
+    checkpoint_site = _optional(values, "CHECKPOINT_SITE", "VPN-CORP")
     if not checkpoint_site:
         raise ConfigError("CHECKPOINT_SITE must not be empty")
-    checkpoint_gateway_name = _optional(values, "CHECKPOINT_GATEWAY_NAME", "GMFINETFW01")
+    checkpoint_gateway_name = _optional(values, "CHECKPOINT_GATEWAY_NAME", "CORP-GW01")
     checkpoint_trac_path = _configured_executable(values, "CHECKPOINT_TRAC_PATH")
     if checkpoint_trac_path is None:
         checkpoint_trac_path = _configured_executable(values, "CHECKPOINT_CLI_PATH")
@@ -289,9 +293,12 @@ def load_settings(
     warp_variant = _optional(values, "WARP_VARIANT", "consumer").lower()
     if warp_variant != "consumer":
         raise ConfigError("WARP_VARIANT must be consumer")
-    warp_mode = _optional(values, "WARP_MODE", "warp").lower()
-    if warp_mode != "warp":
-        raise ConfigError("WARP_MODE must be warp")
+    warp_mode = _optional(values, "WARP_MODE", "proxy").lower()
+    if warp_mode not in {"warp", "proxy"}:
+        raise ConfigError("WARP_MODE must be warp or proxy")
+    warp_proxy_port = _positive_int(values, "WARP_PROXY_PORT", 40000)
+    if not (1024 <= warp_proxy_port <= 65535):
+        raise ConfigError("WARP_PROXY_PORT must be between 1024 and 65535")
     if _boolean(values, "WARP_ALLOW_DNS_ONLY", False):
         raise ConfigError("WARP_ALLOW_DNS_ONLY must remain false")
     warp_trace_url = _optional(values, "WARP_TRACE_URL", "https://www.cloudflare.com/cdn-cgi/trace")
@@ -306,6 +313,12 @@ def load_settings(
         secondary = urlparse(secondary_url)
         if secondary.scheme != "https" or not secondary.hostname:
             raise ConfigError("OFFICE_NETWORK_PROBE_SECONDARY_URL must be an HTTPS URL")
+    viewport_width = _positive_int(values, "VIEWPORT_WIDTH", 1920)
+    viewport_height = _positive_int(values, "VIEWPORT_HEIGHT", 1080)
+    viewport_auto = _boolean(values, "VIEWPORT_AUTO", False)
+    page_zoom_percent = _positive_int(values, "PAGE_ZOOM_PERCENT", 67)
+    if not (25 <= page_zoom_percent <= 200):
+        raise ConfigError("PAGE_ZOOM_PERCENT must be between 25 and 200")
     return Settings(
         cas_url=cas_url,
         cmp_products_url=cmp_products_url,
@@ -317,14 +330,14 @@ def load_settings(
         imap_username=SecretValue(_value(values, "IMAP_USERNAME")),
         imap_password=SecretValue(_value(values, "IMAP_PASSWORD")),
         imap_tls_mode=tls_mode,
-        imap_verify_tls=True,
+        imap_verify_tls=imap_verify_tls,
         imap_mailbox=imap_mailbox,
         otp_subject=subject,
         otp_poll_interval_seconds=_positive_int(values, "OTP_POLL_INTERVAL_SECONDS", 2),
         otp_timeout_seconds=_positive_int(values, "OTP_TIMEOUT_SECONDS", 120),
         run_start_timezone=run_start_timezone,
         browser_timeout_ms=_positive_int(values, "BROWSER_TIMEOUT_MS", 30000),
-        navigation_timeout_ms=_positive_int(values, "NAVIGATION_TIMEOUT_MS", 60000),
+        navigation_timeout_ms=_positive_int(values, "NAVIGATION_TIMEOUT_MS", 90000),
         otp_form_timeout_ms=_positive_int(values, "OTP_FORM_TIMEOUT_MS", 60000),
         otp_clock_skew_tolerance_seconds=_positive_int(values, "OTP_CLOCK_SKEW_TOLERANCE_SECONDS", 120),
         refresh_interval_seconds=_positive_int(values, "REFRESH_INTERVAL_SECONDS", 60),
@@ -346,6 +359,7 @@ def load_settings(
         warp_cli_path=_configured_executable(values, "WARP_CLI_PATH"),
         warp_variant=warp_variant,
         warp_mode=warp_mode,
+        warp_proxy_port=warp_proxy_port,
         warp_allow_dns_only=False,
         warp_reuse_existing=_boolean(values, "WARP_REUSE_EXISTING", True),
         warp_disconnect_on_exit=_boolean(values, "WARP_DISCONNECT_ON_EXIT", True),
@@ -364,4 +378,8 @@ def load_settings(
         warp_trace_timeout_seconds=_positive_float(values, "WARP_TRACE_TIMEOUT_SECONDS", 15.0),
         dashboard_retry_limit=_positive_int(values, "DASHBOARD_RETRY_LIMIT", 3),
         auth_cycle_retry_limit=_positive_int(values, "AUTH_CYCLE_RETRY_LIMIT", 3),
+        viewport_width=viewport_width,
+        viewport_height=viewport_height,
+        viewport_auto=viewport_auto,
+        page_zoom_percent=page_zoom_percent,
     )

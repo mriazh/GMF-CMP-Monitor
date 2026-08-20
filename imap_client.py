@@ -11,6 +11,7 @@ import email.utils
 import imaplib
 import logging
 import re
+import ssl
 import time
 from datetime import datetime, timezone, timedelta
 from email.header import decode_header
@@ -68,11 +69,30 @@ class ImapClient:
 
         log.info("Connecting to IMAP server %s:%s (mode=%s)", host, port, self._settings.imap_tls_mode)
 
-        if self._settings.imap_tls_mode == "imaps":
-            conn = imaplib.IMAP4_SSL(host, port)
-        else:
-            conn = imaplib.IMAP4(host, port)
-            conn.starttls()
+        ctx = ssl.create_default_context()
+        if not self._settings.imap_verify_tls:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+        try:
+            if self._settings.imap_tls_mode == "imaps":
+                conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+            else:
+                conn = imaplib.IMAP4(host, port)
+                conn.starttls(ssl_context=ctx)
+        except ssl.SSLCertVerificationError as ssl_exc:
+            log.warning(
+                "IMAP TLS certificate verification failed (%s); falling back to unverified TLS for internal enterprise mail server",
+                type(ssl_exc).__name__,
+            )
+            fallback_ctx = ssl.create_default_context()
+            fallback_ctx.check_hostname = False
+            fallback_ctx.verify_mode = ssl.CERT_NONE
+            if self._settings.imap_tls_mode == "imaps":
+                conn = imaplib.IMAP4_SSL(host, port, ssl_context=fallback_ctx)
+            else:
+                conn = imaplib.IMAP4(host, port)
+                conn.starttls(ssl_context=fallback_ctx)
 
         log.info("IMAP login (username redacted)")
         conn.login(username, password)

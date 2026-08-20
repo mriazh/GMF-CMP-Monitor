@@ -22,7 +22,7 @@ def make_test_settings(**overrides) -> Settings:
         "cmp_dashboard_url": "https://ep.iotcc.telkomsel.com/#!dashboard",
         "cmp_username": SecretValue("test_user"),
         "cmp_password": SecretValue("test_pass"),
-        "imap_host": "mail.gmf-aeroasia.co.id",
+        "imap_host": "mail.company.local",
         "imap_port": 993,
         "imap_username": SecretValue("imap_user"),
         "imap_password": SecretValue("imap_pass"),
@@ -2335,3 +2335,45 @@ class TestLiveFragmentVerification:
         assert classify_state(page) == DashboardState.DASHBOARD
         # Full verifier contract: _is_verified_dashboard must also be True
         assert _is_verified_dashboard(page) is True
+
+
+class TestReloginLifecycleHooks:
+    def test_perform_relogin_triggers_before_relogin_and_after_relogin(self):
+        from unittest.mock import patch
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+
+        events: list[str] = []
+
+        def before_relogin():
+            events.append("before_relogin")
+
+        def after_relogin():
+            events.append("after_relogin")
+
+        def fake_authenticate_cmp(settings, otp_provider, page, clock=None, on_otp_submitted=None):
+            events.append("authenticate_cmp")
+            if on_otp_submitted:
+                on_otp_submitted()
+            page.current_url = settings.cmp_dashboard_url
+            page.set_hash("#!dashboard")
+            page.set_dashboard_ready(True)
+            return True
+
+        from dashboard_monitor import ContinuousMonitor
+
+        monitor = ContinuousMonitor(
+            settings=settings,
+            page=page,
+            otp_provider=FakeOtpProvider(),
+            clock=FakeClock(),
+            before_relogin=before_relogin,
+            after_relogin=after_relogin,
+        )
+
+        with patch("dashboard_monitor.authenticate_cmp", side_effect=fake_authenticate_cmp):
+            monitor._perform_relogin()
+
+        assert events == ["before_relogin", "authenticate_cmp", "after_relogin"]

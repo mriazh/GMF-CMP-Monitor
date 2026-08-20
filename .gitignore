@@ -33,3 +33,10 @@ docs/
 
 # Local agent handoff context
 CONTEXT.md
+
+# Build, packaging, staging, and release artifacts (never commit frozen output)
+build/
+dist/
+staging/
+release/
+*.zip

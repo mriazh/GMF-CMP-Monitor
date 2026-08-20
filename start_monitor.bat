@@ -7,20 +7,12 @@ echo                Starting GMF CMP Dashboard Monitor
 echo =====================================================================
 echo.
 
-:: Check Python
-where python >nul 2>nul
-if %ERRORLEVEL% neq 0 (
-    echo [ERROR] Python tidak ditemukan di sistem!
-    echo Silakan install Python dan pastikan ditambahkan ke PATH.
-    echo.
-    pause
-    exit /b 1
-)
-
 :: Check .env file
 if not exist ".env" (
     echo [ERROR] File konfigurasi .env tidak ditemukan!
-    echo Jalankan setup.bat terlebih dahulu atau buat file .env dari .env.example.
+    if exist ".env.example" (
+        echo Silakan salin .env.example menjadi .env dan lengkapi kredensial.
+    )
     echo.
     pause
     exit /b 1
@@ -36,8 +28,25 @@ echo Jendela browser Firefox akan terbuka untuk menampilkan dashboard.
 echo Tekan Ctrl + C di jendela ini kapan saja untuk menghentikan monitoring.
 echo.
 
-python main.py
+:: Check for compiled standalone executable
+if exist "GMF-CMP-Monitor.exe" (
+    GMF-CMP-Monitor.exe %*
+    goto :after_run
+)
 
+:: Fallback: Check Python when running from source
+where python >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo [ERROR] GMF-CMP-Monitor.exe maupun Python tidak ditemukan di sistem!
+    echo Silakan jalankan executable GMF-CMP-Monitor.exe atau install Python 3.10+.
+    echo.
+    pause
+    exit /b 1
+)
+
+python main.py %*
+
+:after_run
 if %ERRORLEVEL% neq 0 (
     echo.
     echo [WARNING] Program berhenti dengan kode exit: %ERRORLEVEL%

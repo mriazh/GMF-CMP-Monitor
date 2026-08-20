@@ -32,7 +32,7 @@ def make_test_settings(**overrides) -> Settings:
         "cmp_dashboard_url": "https://ep.iotcc.telkomsel.com/#!dashboard",
         "cmp_username": SecretValue("test_user"),
         "cmp_password": SecretValue("test_pass"),
-        "imap_host": "mail.gmf-aeroasia.co.id",
+        "imap_host": "mail.company.local",
         "imap_port": 993,
         "imap_username": SecretValue("imap_user"),
         "imap_password": SecretValue("imap_pass"),

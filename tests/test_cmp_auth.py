@@ -14,7 +14,7 @@ def make_test_settings(**overrides) -> Settings:
         "cmp_dashboard_url": "https://ep.iotcc.telkomsel.com/#!dashboard",
         "cmp_username": SecretValue("test_user"),
         "cmp_password": SecretValue("test_pass"),
-        "imap_host": "mail.gmf-aeroasia.co.id",
+        "imap_host": "mail.company.local",
         "imap_port": 993,
         "imap_username": SecretValue("imap_user"),
         "imap_password": SecretValue("imap_pass"),
@@ -931,3 +931,28 @@ class TestOtpRejectionDetection:
 
         assert authenticate_cmp(settings=settings, otp_provider=otp, page=page, on_otp_submitted=hook) is True
         assert hook_called is True
+
+
+class TestAcceptableUsagePolicy:
+    def test_acceptable_usage_policy_is_accepted_automatically(self):
+        settings = make_test_settings()
+        page = FakePage()
+        page._title = "Acceptable Usage Policy View - CMP – Central Authentication Service"
+        page.title = lambda: page._title
+
+        original_click = page.click
+
+        def aup_click(selector, timeout=None):
+            original_click(selector, timeout)
+            if "submit" in selector or "Accept" in selector:
+                page._title = "CMP Portal"
+                page._state = "products"
+                page.current_url = settings.cmp_products_url
+
+        page.click = aup_click
+
+        otp = FakeOtpProvider()
+        from cmp_auth import authenticate_cmp
+
+        assert authenticate_cmp(settings=settings, otp_provider=otp, page=page) is True
+        assert page.current_url == settings.cmp_products_url

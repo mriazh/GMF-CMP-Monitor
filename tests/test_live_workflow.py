@@ -108,10 +108,15 @@ def test_live_imap_first_cmp_dashboard_roundtrip():
         controller.ensure_imap_reachable()
         imap_client.connect()
 
+        if settings.warp_mode == "proxy":
+            controller.prepare_warp()
+
         with sync_playwright() as playwright:
-            launch_options: dict[str, bool | str] = {"headless": True}
+            launch_options: dict[str, object] = {"headless": True}
             if settings.firefox_executable_path is not None:
                 launch_options["executable_path"] = str(settings.firefox_executable_path)
+            if settings.warp_mode == "proxy":
+                launch_options["proxy"] = {"server": f"socks5://127.0.0.1:{settings.warp_proxy_port}"}
             browser = playwright.firefox.launch(**launch_options)
             context = browser.new_context(viewport={"width": 1920, "height": 1080})
             page = context.new_page()
@@ -121,10 +126,8 @@ def test_live_imap_first_cmp_dashboard_roundtrip():
                 otp_provider=imap_client,
                 page=page,
                 clock=clock,
+                on_otp_submitted=on_otp_submitted,
             ) is True
-
-            imap_client.disconnect()
-            controller.finish_authentication()
 
             navigate_to_dashboard(page, settings, clock)
             assert classify_state(page) == DashboardState.DASHBOARD

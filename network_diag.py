@@ -218,7 +218,7 @@ def run_network_diagnostic(
     else:
         targets = [
             (APPROVED_CMP_HOST, 443),
-            ("mail.gmf-aeroasia.co.id", 993),
+            ("mail.company.local", 993),
         ]
 
     local_ip = get_local_ip()
@@ -247,7 +247,7 @@ def run_network_diagnostic(
 
     all_targets_reachable = len(tcp_status) > 0 and all(tcp_status.values())
     any_target_reachable = any(tcp_status.values())
-    imap_endpoint = f"{settings.imap_host}:{settings.imap_port}" if settings is not None else "mail.gmf-aeroasia.co.id:993"
+    imap_endpoint = f"{settings.imap_host}:{settings.imap_port}" if settings is not None else "mail.company.local:993"
     cmp_endpoint = f"{cas_host}:{cas_port}" if settings is not None else f"{APPROVED_CMP_HOST}:443"
     imap_reachable = tcp_status.get(imap_endpoint, False)
     cmp_reachable = tcp_status.get(cmp_endpoint, False)

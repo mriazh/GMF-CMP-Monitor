@@ -242,7 +242,7 @@ class TestRunNetworkDiagnostic:
     @patch("network_diag.check_tcp_port")
     def test_run_network_diagnostic_office_partial_cmp(self, mock_tcp, mock_dns, _mock_vpn, _mock_ip):
         def tcp_side_effect(host, port, timeout=3.0):
-            return host == "mail.gmf-aeroasia.co.id" and port == 993
+            return host == "mail.company.local" and port == 993
 
         mock_tcp.side_effect = tcp_side_effect
         settings = _make_dummy_settings()
@@ -250,7 +250,7 @@ class TestRunNetworkDiagnostic:
 
         assert report.position == NetworkPosition.OFFICE_NETWORK_PARTIAL_CMP
         assert report.ready_for_live_test is False
-        assert report.tcp_status["mail.gmf-aeroasia.co.id:993"] is True
+        assert report.tcp_status["mail.company.local:993"] is True
         assert report.tcp_status["ep.iotcc.telkomsel.com:443"] is False
 
     @patch("network_diag.get_local_ip", return_value="127.0.0.1")

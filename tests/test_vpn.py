@@ -26,6 +26,7 @@ BASE_ENV = {
     "CMP_PASSWORD": "cmp-pass",
     "IMAP_USERNAME": "imap-user",
     "IMAP_PASSWORD": "imap-pass",
+    "WARP_MODE": "warp",
 }
 
 
@@ -41,14 +42,14 @@ def settings(**overrides):
 
 
 def test_checkpoint_info_parses_connected_site():
-    output = """Conn VPN-GMF:
- Gw: 118.97.70.226
- Status: Connected
- Active site: true
- Gateway list:
- (Connected) GMFINETFW01
+    output = """Conn VPN-CORP:
+  Gw: 203.0.113.1
+  Status: Connected
+  Active site: true
+  Gateway list:
+  (Connected) CORP-GW01
 """
-    parsed = parse_checkpoint_status(output, "VPN-GMF")
+    parsed = parse_checkpoint_status(output, "VPN-CORP")
     assert parsed.connected is True
 
 
@@ -58,12 +59,12 @@ def test_checkpoint_commands_client_managed_never_include_credentials():
         "trac",
         "connect",
         "-s",
-        "VPN-GMF",
+        "VPN-CORP",
         "-g",
-        "GMFINETFW01",
+        "CORP-GW01",
     ]
     assert "cmp-pass" not in client.command_connect()
-    assert client.command_disconnect() == ["trac", "disconnect", "-g", "GMFINETFW01"]
+    assert client.command_disconnect() == ["trac", "disconnect", "-g", "CORP-GW01"]
 
 
 def test_checkpoint_commands_credentials_mode_includes_username_and_password():
@@ -79,20 +80,20 @@ def test_checkpoint_commands_credentials_mode_includes_username_and_password():
         "trac",
         "connect",
         "-s",
-        "VPN-GMF",
+        "VPN-CORP",
         "-u",
         "my_cp_user",
         "-p",
         "my_cp_secret_password",
         "-g",
-        "GMFINETFW01",
+        "CORP-GW01",
     ]
-    assert client.command_disconnect() == ["trac", "disconnect", "-g", "GMFINETFW01"]
+    assert client.command_disconnect() == ["trac", "disconnect", "-g", "CORP-GW01"]
 
 
 def test_checkpoint_connect_credentials_mode_calls_connect_with_args():
     calls: list[list[str]] = []
-    info = ["Conn VPN-GMF:\n Status: Idle\n", "Conn VPN-GMF:\n Status: Connected\n"]
+    info = ["Conn VPN-CORP:\n Status: Idle\n", "Conn VPN-CORP:\n Status: Connected\n"]
 
     def runner(command, **kwargs):
         calls.append(command)
@@ -111,23 +112,23 @@ def test_checkpoint_connect_credentials_mode_calls_connect_with_args():
     )
     client.connect()
     assert client.owned is True
-    assert calls[0][1:] == ["info", "-s", "VPN-GMF"]
+    assert calls[0][1:] == ["info", "-s", "VPN-CORP"]
     assert calls[1][1:] == [
         "connect",
         "-s",
-        "VPN-GMF",
+        "VPN-CORP",
         "-u",
         "my_cp_user",
         "-p",
         "my_cp_password",
         "-g",
-        "GMFINETFW01",
+        "CORP-GW01",
     ]
 
 
 def test_checkpoint_connect_marks_only_new_connection_owned():
     calls: list[list[str]] = []
-    info = ["Conn VPN-GMF:\n Status: Idle\n", "Conn VPN-GMF:\n Status: Connected\n"]
+    info = ["Conn VPN-CORP:\n Status: Idle\n", "Conn VPN-CORP:\n Status: Connected\n"]
 
     def runner(command, **kwargs):
         calls.append(command)
@@ -138,8 +139,8 @@ def test_checkpoint_connect_marks_only_new_connection_owned():
     client = CheckPointClient(settings(CHECKPOINT_TRAC_PATH="trac"), runner=runner)
     client.connect()
     assert client.owned is True
-    assert calls[0][1:] == ["info", "-s", "VPN-GMF"]
-    assert calls[1][1:] == ["connect", "-s", "VPN-GMF", "-g", "GMFINETFW01"]
+    assert calls[0][1:] == ["info", "-s", "VPN-CORP"]
+    assert calls[1][1:] == ["connect", "-s", "VPN-CORP", "-g", "CORP-GW01"]
 
 
 def test_checkpoint_preexisting_connection_is_reused_without_connect_or_ownership():
@@ -149,7 +150,7 @@ def test_checkpoint_preexisting_connection_is_reused_without_connect_or_ownershi
         calls.append(command)
         return SimpleNamespace(
             returncode=0,
-            stdout="Conn VPN-GMF:\n Status: Connected\n",
+            stdout="Conn VPN-CORP:\n Status: Connected\n",
             stderr="",
         )
 
@@ -169,7 +170,7 @@ def test_checkpoint_cleanup_does_not_disconnect_preexisting_connection():
         calls.append(command)
         return SimpleNamespace(
             returncode=0,
-            stdout="Conn VPN-GMF:\n Status: Connected\n",
+            stdout="Conn VPN-CORP:\n Status: Connected\n",
             stderr="",
         )
 
@@ -322,15 +323,15 @@ def test_config_loads_vpn_fields_and_quoted_paths(tmp_path):
     env = {
         **BASE_ENV,
         "CHECKPOINT_TRAC_PATH": f'"{trac}"',
-        "CHECKPOINT_GATEWAY_IP": "118.97.70.226",
+        "CHECKPOINT_GATEWAY_IP": "203.0.113.1",
         "WARP_CLI_PATH": f'"{warp}"',
-        "OFFICE_NETWORK_PROBE_SECONDARY_URL": "https://soe.gmf-aeroasia.co.id/",
+        "OFFICE_NETWORK_PROBE_SECONDARY_URL": "https://portal.company.local/",
     }
     loaded = load_settings(env=env)
     assert loaded.checkpoint_trac_path == trac.resolve()
-    assert loaded.checkpoint_site == "VPN-GMF"
-    assert loaded.checkpoint_gateway_name == "GMFINETFW01"
-    assert loaded.checkpoint_gateway_ip == "118.97.70.226"
+    assert loaded.checkpoint_site == "VPN-CORP"
+    assert loaded.checkpoint_gateway_name == "CORP-GW01"
+    assert loaded.checkpoint_gateway_ip == "203.0.113.1"
     assert loaded.warp_cli_path == warp.resolve()
     assert loaded.warp_mode == "warp"
     assert loaded.office_network_probe_port == 993
@@ -433,7 +434,7 @@ def test_checkpoint_connect_retries_and_is_bounded():
         nonlocal attempts
         calls.append(command)
         if command[1] == "info":
-            return SimpleNamespace(returncode=0, stdout="Conn VPN-GMF:\n Status: Idle\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="Conn VPN-CORP:\n Status: Idle\n", stderr="")
         attempts += 1
         return SimpleNamespace(returncode=1, stdout="", stderr="failure")
 
@@ -448,7 +449,7 @@ def test_checkpoint_connect_retries_and_is_bounded():
 
     assert attempts == 2
     assert client.owned is False
-    assert all(command[1:] != ["connect", "-s", "VPN-GMF", "-g", "GMFINETFW01", "cmp-pass"] for command in calls)
+    assert all(command[1:] != ["connect", "-s", "VPN-CORP", "-g", "CORP-GW01", "cmp-pass"] for command in calls)
 
 
 def test_warp_connect_retries_and_is_bounded():
@@ -679,5 +680,58 @@ def test_warp_status_queries_mode_from_settings_when_status_lacks_mode():
     assert len(calls) == 2
     assert calls[0][1:] == ["--no-ansi", "status"]
     assert calls[1][1:] == ["--no-ansi", "settings"]
+
+
+def test_warp_connect_in_proxy_mode_configures_mode_and_port():
+    calls: list[list[str]] = []
+    status_outputs = [
+        "Status update: Disconnected\n",
+        "Status update: Connected\nMode: Proxy\n",
+    ]
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "status":
+            return SimpleNamespace(returncode=0, stdout=status_outputs.pop(0), stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    client = WarpClient(
+        settings(
+            WARP_CLI_PATH="warp-cli",
+            WARP_MODE="proxy",
+            WARP_PROXY_PORT="40000",
+            WARP_CONNECT_TIMEOUT_SECONDS="1",
+            WARP_STATUS_POLL_INTERVAL_SECONDS="0.1",
+        ),
+        runner=runner,
+        sleeper=lambda _: None,
+    )
+    client.connect()
+    assert client.owned is True
+    client.wait_until_connected()
+    assert calls[0][1:] == ["--no-ansi", "status"]
+    assert calls[1][1:] == ["mode", "proxy"]
+    assert calls[2][1:] == ["proxy", "port", "40000"]
+    assert calls[3][1:] == ["connect"]
+    assert calls[4][1:] == ["--no-ansi", "status"]
+
+
+def test_warp_validate_in_proxy_mode():
+    def runner(command, **kwargs):
+        if command[-1] == "status":
+            return SimpleNamespace(returncode=0, stdout="Status update: Connected\nMode: Proxy\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    client = WarpClient(
+        settings(
+            WARP_CLI_PATH="warp-cli",
+            WARP_MODE="proxy",
+            WARP_PROXY_PORT="40000",
+        ),
+        runner=runner,
+    )
+
+    client._validate_socks5_proxy = lambda: "ip=1.2.3.4\nwarp=on\n"
+    client.validate()
 
 

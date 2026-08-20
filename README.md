@@ -1,6 +1,6 @@
 # GMF CMP Monitor
 
-Automated real-time monitoring and alert pipeline for the Telkomsel CMP (Connectivity Management Platform) Dashboard at GMF AeroAsia.
+Automated real-time monitoring and alert pipeline for the Telkomsel CMP (Connectivity Management Platform) Dashboard at the enterprise.
 
 Monitors the CMP Dashboard state continuously, auto-refreshes periodically, handles session expirations gracefully, and automatically manages VPN connectivity to bridge between corporate email (IMAP OTP retrieval) and public Cloudflare WARP (bypassing intranet firewall blocking on the Vaadin SPA).
 
@@ -44,7 +44,7 @@ Double-click **`setup.bat`**:
 ### 3. Configure Credentials
 Open `.env` in Notepad and verify your credentials:
 - `CMP_USERNAME` & `CMP_PASSWORD`: Telkomsel CMP portal credentials.
-- `IMAP_USERNAME` & `IMAP_PASSWORD`: Corporate GMF mailbox credentials for OTP retrieval.
+- `IMAP_USERNAME` & `IMAP_PASSWORD`: Corporate mailbox credentials for OTP retrieval.
 - `HEADLESS=false`: Displays the browser live on screen.
 
 ### 4. Launch Monitoring
@@ -87,9 +87,9 @@ CMP_USERNAME=your_cmp_username
 CMP_PASSWORD=your_cmp_password
 
 # IMAP Configuration
-IMAP_HOST=mail.gmf-aeroasia.co.id
+IMAP_HOST=mail.company.local
 IMAP_PORT=993
-IMAP_USERNAME=your_email@gmf-aeroasia.co.id
+IMAP_USERNAME=your_email@company.local
 IMAP_PASSWORD=your_email_password
 IMAP_TLS_MODE=imaps
 IMAP_VERIFY_TLS=true
@@ -108,8 +108,8 @@ WARP_CLI_PATH="C:/Program Files/Cloudflare/Cloudflare WARP/warp-cli.exe"
 WARP_MODE=warp
 
 # (Optional: Only when running outside office network)
-CHECKPOINT_SITE=VPN-GMF
-CHECKPOINT_GATEWAY_NAME=GMFINETFW01
+CHECKPOINT_SITE=VPN-CORP
+CHECKPOINT_GATEWAY_NAME=CORP-GW01
 CHECKPOINT_AUTH_MODE=credentials
 CHECKPOINT_USERNAME=your_checkpoint_user
 CHECKPOINT_PASSWORD=your_checkpoint_pass

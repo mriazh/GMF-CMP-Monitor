@@ -15,7 +15,7 @@ TEST_ENV = {
     "CMP_PASSWORD": "test_pass",
     "IMAP_USERNAME": "imap_user",
     "IMAP_PASSWORD": "imap_pass",
-    "IMAP_HOST": "mail.gmf-aeroasia.co.id",
+    "IMAP_HOST": "mail.company.local",
     "IMAP_PORT": "993",
     "IMAP_TLS_MODE": "imaps",
     "IMAP_VERIFY_TLS": "true",
@@ -24,6 +24,7 @@ TEST_ENV = {
     "RUN_START_TIMEZONE": "Asia/Jakarta",
     "HEADLESS": "false",
     "LOG_LEVEL": "INFO",
+    "WARP_MODE": "warp",
 }
 
 
@@ -34,7 +35,7 @@ def make_test_settings() -> Settings:
         cmp_dashboard_url="https://ep.iotcc.telkomsel.com/#!dashboard",
         cmp_username=SecretValue("test_user"),
         cmp_password=SecretValue("test_pass"),
-        imap_host="mail.gmf-aeroasia.co.id",
+        imap_host="mail.company.local",
         imap_port=993,
         imap_username=SecretValue("imap_user"),
         imap_password=SecretValue("imap_pass"),
@@ -124,6 +125,40 @@ class TestFirefoxOnly:
                         # Verify Chromium/Chrome/WebKit were NOT called
                         assert not mock_playwright.chromium.launch.called
                         assert not mock_playwright.webkit.launch.called
+
+    @patch("main.navigate_to_dashboard")
+    def test_firefox_launched_with_socks5_proxy_in_proxy_mode(self, mock_navigate):
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap = MagicMock()
+                mock_imap_class.return_value = mock_imap
+
+                with patch("main.authenticate_cmp"):
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        mock_monitor = MagicMock()
+                        mock_monitor.monitor_once.side_effect = [False, KeyboardInterrupt()]
+                        mock_monitor_class.return_value = mock_monitor
+
+                        import main
+                        env = dict(TEST_ENV)
+                        env["WARP_MODE"] = "proxy"
+                        env["WARP_PROXY_PORT"] = "40000"
+                        main.main(env=env)
+
+                        mock_playwright.firefox.launch.assert_called_once_with(
+                            headless=False,
+                            proxy={"server": "socks5://127.0.0.1:40000"}
+                        )
 
 
 class TestInstalledFirefoxExecutable:

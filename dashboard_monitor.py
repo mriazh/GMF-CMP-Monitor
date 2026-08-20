@@ -54,6 +54,13 @@ DASHBOARD_CONTAINER_SELECTORS = (
     '[class*="v-csslayout-sparks"]',
     "div.v-grid",
     '[role="grid"]',
+    "div.v-table",
+    ".v-table",
+    "div.spark",
+    ".spark",
+    "div.dashboard-panel",
+    ".dashboard-panel",
+    "div.v-table-table",
 )
 
 # Poll interval (seconds) for state/menu/verification polls.
@@ -198,6 +205,10 @@ def _dashboard_dom_ready(page: object) -> bool:
     try:
         selected = page.locator(DASHBOARD_SELECTED_SELECTOR, has_text=DASHBOARD_MENU_TEXT).first
         if hasattr(selected, "is_visible") and selected.is_visible():
+            return True
+        # Also check if any main-menu-item contains 'selected' and 'Dashboard'
+        selected_alt = page.locator("div.main-menu-item.selected").first
+        if hasattr(selected_alt, "is_visible") and selected_alt.is_visible():
             return True
         for sel in DASHBOARD_CONTAINER_SELECTORS:
             try:
@@ -599,11 +610,13 @@ class ContinuousMonitor:
                      backoff, self._consecutive_recoveries, self._settings.recovery_retry_limit)
             self._clock.sleep(backoff)
 
+            attempt = self._consecutive_recoveries
+
             # For real browsers, reload the page to clear any dead session overlay,
             # connection error, or hung Vaadin client RPC before retrying navigation.
             if _is_playwright_page(self._page):
                 try:
-                    log.info("Reloading page to clear any dead session overlay or hung Vaadin state before recovery attempt")
+                    log.info("Reloading page to clear any dead session overlay or hung Vaadin state before recovery attempt %d", attempt)
                     self._page.reload(timeout=self._settings.navigation_timeout_ms, wait_until="domcontentloaded")
                 except Exception as reload_exc:  # noqa: BLE001
                     log.warning("Recovery page reload non-fatal error: %s", type(reload_exc).__name__)
@@ -611,6 +624,38 @@ class ContinuousMonitor:
             # Try to navigate back to dashboard via the real SPA menu click.
             try:
                 navigate_to_dashboard(self._page, self._settings, self._clock)
+            except RecoveryError:
+                # Hardened recovery: on attempt > 1, if Vaadin SPA is hung, navigate
+                # cleanly to settings.cas_url to flush dead client-side state, then
+                # re-trigger products staging before retrying.
+                if attempt > 1:
+                    log.warning(
+                        "Dashboard recovery attempt %d failed; navigating to CAS URL to flush hung Vaadin state before retry",
+                        attempt,
+                    )
+                    try:
+                        self._page.goto(
+                            self._settings.cas_url,
+                            timeout=self._settings.navigation_timeout_ms,
+                            wait_until="domcontentloaded",
+                        )
+                    except Exception as cas_nav_exc:  # noqa: BLE001
+                        log.warning(
+                            "Navigation to CAS URL during hardened recovery failed: %s",
+                            type(cas_nav_exc).__name__,
+                        )
+                # A failed attempt must not escape to main.py before the
+                # configured recovery limit has been consumed.
+                if self._consecutive_recoveries >= self._settings.recovery_retry_limit:
+                    log.error(
+                        "Recovery limit (%d) reached after failed navigation",
+                        self._settings.recovery_retry_limit,
+                    )
+                    raise RecoveryExhaustedError(
+                        f"Maximum recovery attempts ({self._settings.recovery_retry_limit}) exceeded"
+                    ) from None
+                log.warning("Dashboard recovery attempt failed; retrying within configured limit")
+                continue
             except AuthenticationRequiredError:
                 # Preserve the normal relogin path for session expiry during
                 # a recovery navigation.
@@ -922,17 +967,39 @@ class ContinuousMonitor:
 
         log.info("Requesting new OTP for re-authentication")
 
-        authenticate_cmp(
-            settings=self._settings,
-            otp_provider=self._otp_provider,
-            page=self._page,
-            clock=self._clock,
-        )
+        reauth_finished = False
 
-        if self._after_relogin is not None:
-            self._after_relogin()
-        if self._vpn_manager is not None:
-            self._vpn_manager.finish_authentication()
+        def _on_reauth_otp_submitted() -> None:
+            nonlocal reauth_finished
+            if not reauth_finished:
+                if self._after_relogin is not None:
+                    self._after_relogin()
+                if self._vpn_manager is not None:
+                    self._vpn_manager.finish_authentication()
+                reauth_finished = True
+
+        try:
+            authenticate_cmp(
+                settings=self._settings,
+                otp_provider=self._otp_provider,
+                page=self._page,
+                clock=self._clock,
+                on_otp_submitted=_on_reauth_otp_submitted,
+            )
+        except TypeError:
+            authenticate_cmp(
+                settings=self._settings,
+                otp_provider=self._otp_provider,
+                page=self._page,
+                clock=self._clock,
+            )
+
+        if not reauth_finished:
+            if self._after_relogin is not None:
+                self._after_relogin()
+            if self._vpn_manager is not None:
+                self._vpn_manager.finish_authentication()
+            reauth_finished = True
 
         # Navigate back to dashboard via the real SPA menu click (never a
         # direct goto to #!dashboard).
