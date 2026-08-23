@@ -134,6 +134,17 @@ def _do_authenticate(
             page.fill("#password", settings.cmp_password.get_secret_value())
             log.info("Credentials filled")
 
+            # Reset UID baseline before submitting credentials to ensure
+            # only newly arriving OTP emails (higher UID) are accepted.
+            # This prevents race conditions where delayed OTP emails from
+            # a previous attempt arrive during the current attempt's poll.
+            if hasattr(otp_provider, "reset_uid_baseline"):
+                try:
+                    baseline = otp_provider.reset_uid_baseline()
+                    log.info("OTP UID baseline reset to %s", baseline)
+                except Exception as exc:
+                    log.warning("Failed to reset OTP UID baseline: %s", exc)
+
             # Submit username/password form
             current_step = "submitting initial credentials form"
             page.wait_for_selector("#fm1 input[name='submit']", state="visible", timeout=settings.navigation_timeout_ms)

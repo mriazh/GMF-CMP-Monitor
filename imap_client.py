@@ -108,12 +108,10 @@ class ImapClient:
                 raise RuntimeError(f"Failed to select mailbox '{mailbox}'")
             self._connection = conn
             log.info("Connected to IMAP mailbox '%s' (read-only)", mailbox)
-            # Take UID snapshot at initial connect time (before authentication) to avoid
-            # race condition where a previous run's delayed OTP email arrives
-            # during the current run's poll.
-            # On reconnect, reuse the original UID baseline.
-            if self._base_uid == 0:
-                self._take_uid_snapshot()
+            # Take UID snapshot on every connect to establish a fresh baseline
+            # before authentication. This prevents race conditions where delayed
+            # OTP emails from a previous attempt arrive during the current attempt's poll.
+            self._take_uid_snapshot()
         except Exception as exc:
             # Clean up partial connection
             if conn is not None:
@@ -153,6 +151,19 @@ class ImapClient:
         except Exception as exc:
             log.warning("Failed to take UID snapshot: %s", exc)
             self._base_uid = 0
+
+    def reset_uid_baseline(self) -> int:
+        """Reset the UID baseline by taking a fresh snapshot.
+
+        This should be called immediately before submitting credentials
+        on each authentication attempt to ensure only newly arriving
+        OTP emails (higher UID) are considered valid.
+
+        Returns:
+            The new baseline UID value.
+        """
+        self._take_uid_snapshot()
+        return self._base_uid
 
     def disconnect(self) -> None:
         if self._connection is not None:

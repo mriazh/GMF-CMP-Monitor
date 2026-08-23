@@ -334,7 +334,7 @@ def load_settings(
         imap_mailbox=imap_mailbox,
         otp_subject=subject,
         otp_poll_interval_seconds=_positive_int(values, "OTP_POLL_INTERVAL_SECONDS", 2),
-        otp_timeout_seconds=_positive_int(values, "OTP_TIMEOUT_SECONDS", 120),
+        otp_timeout_seconds=_positive_int(values, "OTP_TIMEOUT_SECONDS", 300),
         run_start_timezone=run_start_timezone,
         browser_timeout_ms=_positive_int(values, "BROWSER_TIMEOUT_MS", 30000),
         navigation_timeout_ms=_positive_int(values, "NAVIGATION_TIMEOUT_MS", 90000),

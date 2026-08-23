@@ -1026,3 +1026,76 @@ class TestImapConnectionCleanup:
                 if args:
                     assert "secret123" not in str(args)
                     assert "imap_pass" not in str(args)
+
+
+class TestUidBaseline:
+    """Tests for UID baseline snapshot and reset functionality."""
+
+    def test_reset_uid_baseline_calls_take_snapshot_and_returns_base_uid(self):
+        """reset_uid_baseline() should call _take_uid_snapshot and return _base_uid."""
+        from unittest.mock import MagicMock, patch
+
+        from imap_client import ImapClient
+
+        settings = make_test_settings()
+        clock = FakeClock(time.time())
+        client = ImapClient(settings, clock)
+
+        # Mock the connection and _take_uid_snapshot
+        mock_conn = MagicMock()
+        client._connection = mock_conn
+
+        # Mock _take_uid_snapshot to set a known base_uid
+        with patch.object(client, "_take_uid_snapshot") as mock_snapshot:
+            def set_base_uid():
+                client._base_uid = 42
+
+            mock_snapshot.side_effect = set_base_uid
+
+            result = client.reset_uid_baseline()
+
+            # Should call _take_uid_snapshot
+            mock_snapshot.assert_called_once()
+            # Should return the new baseline UID
+            assert result == 42
+
+    def test_connect_always_calls_take_uid_snapshot(self):
+        """connect() should always call _take_uid_snapshot, not just when _base_uid == 0."""
+        from unittest.mock import MagicMock, patch
+
+        from imap_client import ImapClient
+
+        settings = make_test_settings()
+        clock = FakeClock(time.time())
+        client = ImapClient(settings, clock)
+
+        mock_conn = MagicMock()
+        mock_conn.select.return_value = ("OK", [b"1"])
+
+        # Pre-set _base_uid to non-zero (simulating reconnect)
+        client._base_uid = 100
+
+        with patch.object(client, "_take_uid_snapshot") as mock_snapshot:
+            with patch.object(client, "_connect_imap", return_value=mock_conn):
+                def set_base_uid():
+                    client._base_uid = 200
+
+                mock_snapshot.side_effect = set_base_uid
+
+                client.connect()
+
+                # Should still call _take_uid_snapshot even though _base_uid != 0
+                mock_snapshot.assert_called_once()
+                # Should have updated _base_uid to new value
+                assert client._base_uid == 200
+
+    def test_reset_uid_baseline_public_method_exists(self):
+        """Verify ImapClient has the public reset_uid_baseline method."""
+        from imap_client import ImapClient
+
+        settings = make_test_settings()
+        clock = FakeClock(time.time())
+        client = ImapClient(settings, clock)
+
+        assert hasattr(client, "reset_uid_baseline")
+        assert callable(client.reset_uid_baseline)
