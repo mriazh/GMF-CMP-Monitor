@@ -352,7 +352,7 @@ def main(
     except Exception as exc:  # noqa: BLE001
         cause = getattr(exc, "__cause__", None)
         cause_str = f" caused by {type(cause).__name__}" if cause else ""
-        log.error("Monitor failed (%s%s)", type(exc).__name__, cause_str)
+        log.error("Monitor failed (%s%s): %s", type(exc).__name__, cause_str, exc, exc_info=True)
         return 1
     finally:
         log.info("Cleaning up resources...")

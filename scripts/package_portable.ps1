@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.2",
+    [string]$Version = "1.0.3",
     [switch]$Force,
     [switch]$Upload
 )
@@ -136,6 +136,13 @@ if (-not $FirefoxExe) {
     Stop-Packaging "Bundled Firefox is missing under $BrowserDir. Run .\scripts\build_exe.ps1 first."
 }
 Write-Host "Bundled Firefox verified at $($FirefoxExe.FullName)" -ForegroundColor Green
+
+$PrintDepsExe = Get-ChildItem -LiteralPath $BrowserDir -Recurse -File -Filter "PrintDeps.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($PrintDepsExe) {
+    Write-Host "Bundled winldd helper verified at $($PrintDepsExe.FullName)" -ForegroundColor Green
+} else {
+    Write-Host "Warning: winldd helper PrintDeps.exe not found under $BrowserDir." -ForegroundColor Yellow
+}
 
 Write-Host "Populating clean staging directory from the explicit allowlist..." -ForegroundColor Cyan
 $MissingFiles = @()

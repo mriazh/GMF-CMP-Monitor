@@ -755,6 +755,39 @@ class TestExceptionTracebackAndCleanupLogging:
                             warning_call_args = [call[0][0] for call in mock_log.warning.call_args_list]
                             assert any("Cleanup failure" in msg or "Failed to close page" in msg for msg in warning_call_args)
 
+    @patch("main.navigate_to_dashboard")
+    def test_unexpected_exception_logs_message_and_traceback(self, mock_navigate):
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap = MagicMock()
+                mock_imap_class.return_value = mock_imap
+
+                exc = RuntimeError("Unexpected boom")
+                with patch("main.authenticate_cmp", side_effect=exc):
+                    with patch("main.log") as mock_log:
+                        import main
+
+                        result = main.main(env=TEST_ENV)
+
+                        assert result == 1
+                        mock_log.error.assert_called_with(
+                            "Monitor failed (%s%s): %s",
+                            "RuntimeError",
+                            "",
+                            exc,
+                            exc_info=True,
+                        )
+
 
 
 class TestMainVpnLifecycle:

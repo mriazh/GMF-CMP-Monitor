@@ -66,9 +66,24 @@ $Destination = Join-Path $TargetBrowserDir $FirefoxFolder.Name
 Copy-Item -LiteralPath $FirefoxFolder.FullName -Destination $Destination -Recurse -Force
 Write-Host "Bundled Firefox browser from $($FirefoxFolder.FullName) into $Destination" -ForegroundColor Green
 
-$FirefoxExe = Join-Path $Destination "firefox.exe"
+$FirefoxExe = Join-Path $Destination "firefox\firefox.exe"
+if (-not (Test-Path -LiteralPath $FirefoxExe)) {
+    $FirefoxExe = Join-Path $Destination "firefox.exe"
+}
 if (-not (Test-Path -LiteralPath $FirefoxExe)) {
     Write-Host "Error: bundled Firefox is missing firefox.exe at $FirefoxExe" -ForegroundColor Red
     exit 1
 }
 Write-Host "Bundled Firefox verified at $FirefoxExe" -ForegroundColor Green
+
+$WinlddFolders = Get-ChildItem -LiteralPath $PlaywrightRoot -Force -Directory -Filter "winldd-*" -ErrorAction SilentlyContinue
+if ($WinlddFolders -and $WinlddFolders.Count -gt 0) {
+    $WinlddFolder = $WinlddFolders[0]
+    $WinlddDest = Join-Path $TargetBrowserDir $WinlddFolder.Name
+    Copy-Item -LiteralPath $WinlddFolder.FullName -Destination $WinlddDest -Recurse -Force
+    Write-Host "Bundled winldd helper from $($WinlddFolder.FullName) into $WinlddDest" -ForegroundColor Green
+    $PrintDeps = Join-Path $WinlddDest "PrintDeps.exe"
+    if (Test-Path -LiteralPath $PrintDeps) {
+        Write-Host "Bundled winldd PrintDeps.exe verified at $PrintDeps" -ForegroundColor Green
+    }
+}
