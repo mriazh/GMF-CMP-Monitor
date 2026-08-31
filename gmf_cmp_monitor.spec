@@ -47,6 +47,7 @@ exe = EXE(
     options,
     exclude_binaries=True,
     name="GMF-CMP-Monitor",
+    icon=os.path.join(PROJECT_ROOT, "assets", "app.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

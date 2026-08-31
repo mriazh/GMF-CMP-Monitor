@@ -624,10 +624,11 @@ class ContinuousMonitor:
             # Try to navigate back to dashboard via the real SPA menu click.
             try:
                 navigate_to_dashboard(self._page, self._settings, self._clock)
+            except AuthenticationRequiredError:
+                # Preserve the normal relogin path for session expiry during recovery.
+                # MUST appear before except RecoveryError because AuthenticationRequiredError subclasses RecoveryError.
+                raise
             except RecoveryError:
-                # Hardened recovery: on attempt > 1, if Vaadin SPA is hung, navigate
-                # cleanly to settings.cas_url to flush dead client-side state, then
-                # re-trigger products staging before retrying.
                 if attempt > 1:
                     log.warning(
                         "Dashboard recovery attempt %d failed; navigating to CAS URL to flush hung Vaadin state before retry",
@@ -641,28 +642,10 @@ class ContinuousMonitor:
                         )
                     except Exception as cas_nav_exc:  # noqa: BLE001
                         log.warning(
-                            "Navigation to CAS URL during hardened recovery failed: %s",
+                            "Navigation to CAS URL during hardened recovery failed: %s (%s)",
                             type(cas_nav_exc).__name__,
+                            cas_nav_exc,
                         )
-                # A failed attempt must not escape to main.py before the
-                # configured recovery limit has been consumed.
-                if self._consecutive_recoveries >= self._settings.recovery_retry_limit:
-                    log.error(
-                        "Recovery limit (%d) reached after failed navigation",
-                        self._settings.recovery_retry_limit,
-                    )
-                    raise RecoveryExhaustedError(
-                        f"Maximum recovery attempts ({self._settings.recovery_retry_limit}) exceeded"
-                    ) from None
-                log.warning("Dashboard recovery attempt failed; retrying within configured limit")
-                continue
-            except AuthenticationRequiredError:
-                # Preserve the normal relogin path for session expiry during
-                # a recovery navigation.
-                raise
-            except RecoveryError:
-                # A failed attempt must not escape to main.py before the
-                # configured recovery limit has been consumed.
                 if self._consecutive_recoveries >= self._settings.recovery_retry_limit:
                     log.error(
                         "Recovery limit (%d) reached after failed navigation",

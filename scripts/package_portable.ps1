@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.3",
+    [string]$Version = "1.0.4",
     [switch]$Force,
     [switch]$Upload
 )
@@ -36,7 +36,8 @@ $AllowedFiles = @(
     "network_probe.py",
     "otp.py",
     "vpn.py",
-    "config.py"
+    "config.py",
+    "assets/app.ico"
 )
 
 $ForbiddenPatterns = @(

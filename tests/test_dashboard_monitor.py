@@ -1554,6 +1554,28 @@ class TestNavigationFailureRecovery:
         assert settings.recovery_backoff_seconds in clock.sleep_calls
         assert page.goto_calls == []
 
+    def test_recover_to_dashboard_propagates_auth_required_error(self):
+        from unittest.mock import patch
+        from dashboard_monitor import (
+            AuthenticationRequiredError,
+            ContinuousMonitor,
+        )
+
+        settings = make_test_settings(recovery_retry_limit=3)
+        page = FakePage("https://unknown.com")
+        otp_provider = FakeOtpProvider()
+        clock = FakeClock()
+        monitor = ContinuousMonitor(settings=settings, page=page, otp_provider=otp_provider, clock=clock)
+
+        with patch("dashboard_monitor.navigate_to_dashboard", side_effect=AuthenticationRequiredError("Session expired")) as mock_nav:
+            with pytest.raises(AuthenticationRequiredError) as exc_info:
+                monitor._recover_to_dashboard()
+
+        assert "Session expired" in str(exc_info.value)
+        assert mock_nav.call_count == 1
+        assert monitor._consecutive_recoveries == 1
+        assert monitor._consecutive_recoveries < settings.recovery_retry_limit
+
 
 class TestDashboardMenuNavigation:
     """SPA menu-click navigation from products/dashboard to the dashboard state."""
