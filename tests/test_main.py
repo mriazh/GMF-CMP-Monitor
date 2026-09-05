@@ -27,6 +27,18 @@ TEST_ENV = {
     "WARP_MODE": "warp",
 }
 
+EXPECTED_LOW_MEMORY_PREFS = {
+    "browser.cache.disk.enable": False,
+    "browser.cache.disk.smart_size.enabled": False,
+    "browser.cache.memory.capacity": 32768,
+    "browser.sessionhistory.max_entries": 2,
+    "dom.ipc.processCount": 1,
+    "media.peerconnection.enabled": False,
+    "toolkit.telemetry.enabled": False,
+    "accessibility.force_disabled": 1,
+    "browser.pagethumbnails.capturing_disabled": True,
+}
+
 
 def make_test_settings() -> Settings:
     return Settings(
@@ -58,6 +70,7 @@ def make_test_settings() -> Settings:
         runtime_artifact_dir=None,
         browser_storage_state_path=None,
         log_level="INFO",
+        low_memory_mode=True,
     )
 
 
@@ -118,7 +131,10 @@ class TestFirefoxOnly:
                         main.main(env=TEST_ENV)
 
                         # Verify Firefox was launched
-                        mock_playwright.firefox.launch.assert_called_once_with(headless=False)
+                        mock_playwright.firefox.launch.assert_called_once_with(
+                            headless=False,
+                            firefox_user_prefs=EXPECTED_LOW_MEMORY_PREFS,
+                        )
                         # Verify browser context was created with 1920x1080 viewport
 
                         mock_browser.new_context.assert_called_once_with(viewport={"width": 1920, "height": 1080})
@@ -157,7 +173,8 @@ class TestFirefoxOnly:
 
                         mock_playwright.firefox.launch.assert_called_once_with(
                             headless=False,
-                            proxy={"server": "socks5://127.0.0.1:40000"}
+                            proxy={"server": "socks5://127.0.0.1:40000"},
+                            firefox_user_prefs=EXPECTED_LOW_MEMORY_PREFS,
                         )
 
 
@@ -183,8 +200,71 @@ class TestInstalledFirefoxExecutable:
                 import main
                 main.main(env=env)
         mock_playwright.firefox.launch.assert_called_once_with(
-            headless=False, executable_path=str(executable.resolve())
+            headless=False,
+            executable_path=str(executable.resolve()),
+            firefox_user_prefs=EXPECTED_LOW_MEMORY_PREFS,
         )
+
+
+class TestLowMemoryFirefoxProfile:
+    @patch("main.navigate_to_dashboard")
+    def test_firefox_user_prefs_passed_when_low_memory_mode_true(self, mock_navigate):
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap_class.return_value = MagicMock()
+                with patch("main.authenticate_cmp"):
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        mock_monitor = MagicMock()
+                        mock_monitor.monitor_once.side_effect = KeyboardInterrupt()
+                        mock_monitor_class.return_value = mock_monitor
+
+                        import main
+                        env = dict(TEST_ENV)
+                        env["LOW_MEMORY_MODE"] = "true"
+                        main.main(env=env)
+
+                        call_kwargs = mock_playwright.firefox.launch.call_args.kwargs
+                        assert "firefox_user_prefs" in call_kwargs
+                        assert call_kwargs["firefox_user_prefs"] == EXPECTED_LOW_MEMORY_PREFS
+
+    @patch("main.navigate_to_dashboard")
+    def test_firefox_user_prefs_omitted_when_low_memory_mode_false(self, mock_navigate):
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap_class.return_value = MagicMock()
+                with patch("main.authenticate_cmp"):
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        mock_monitor = MagicMock()
+                        mock_monitor.monitor_once.side_effect = KeyboardInterrupt()
+                        mock_monitor_class.return_value = mock_monitor
+
+                        import main
+                        env = dict(TEST_ENV)
+                        env["LOW_MEMORY_MODE"] = "false"
+                        main.main(env=env)
+
+                        call_kwargs = mock_playwright.firefox.launch.call_args.kwargs
+                        assert "firefox_user_prefs" not in call_kwargs
 
 
 class TestPlaywrightStopInvoked:

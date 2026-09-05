@@ -208,6 +208,22 @@ def main(
             launch_kwargs["proxy"] = {"server": f"socks5://127.0.0.1:{settings.warp_proxy_port}"}
             log.info("Firefox proxy configured: socks5://127.0.0.1:%d (isolated browser routing)", settings.warp_proxy_port)
 
+        if settings.low_memory_mode:
+            launch_kwargs["firefox_user_prefs"] = {
+                "browser.cache.disk.enable": False,
+                "browser.cache.disk.smart_size.enabled": False,
+                "browser.cache.memory.capacity": 32768,
+                "browser.sessionhistory.max_entries": 2,
+                "dom.ipc.processCount": 1,
+                "media.peerconnection.enabled": False,
+                "toolkit.telemetry.enabled": False,
+                "accessibility.force_disabled": 1,
+                "browser.pagethumbnails.capturing_disabled": True,
+            }
+            log.info(
+                "Low-memory Firefox profile active: disk cache disabled, RAM cache bounded to 32MB, single-process"
+            )
+
         browser = playwright.firefox.launch(**launch_kwargs)
 
         if settings.viewport_auto:

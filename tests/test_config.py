@@ -1061,3 +1061,64 @@ class TestWarpModeValidation:
         }
         with pytest.raises(ConfigError, match="WARP_PROXY_PORT must be between 1024 and 65535"):
             load_settings(env=env)
+
+
+class TestLowMemoryModeValidation:
+    """Tests for LOW_MEMORY_MODE configuration."""
+
+    def test_low_memory_mode_default_true(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+        }
+        settings = load_settings(env=env)
+        assert settings.low_memory_mode is True
+
+    def test_low_memory_mode_false_values_accepted(self):
+        for val in ["false", "0", "off", "no", "False", "OFF", "NO"]:
+            env = {
+                "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+                "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+                "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+                "CMP_USERNAME": "testuser",
+                "CMP_PASSWORD": "testpass",
+                "IMAP_USERNAME": "imapuser",
+                "IMAP_PASSWORD": "imappass",
+                "LOW_MEMORY_MODE": val,
+            }
+            settings = load_settings(env=env)
+            assert settings.low_memory_mode is False
+
+    def test_low_memory_mode_true_values_accepted(self):
+        for val in ["true", "1", "on", "yes", "True", "ON", "YES"]:
+            env = {
+                "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+                "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+                "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+                "CMP_USERNAME": "testuser",
+                "CMP_PASSWORD": "testpass",
+                "IMAP_USERNAME": "imapuser",
+                "IMAP_PASSWORD": "imappass",
+                "LOW_MEMORY_MODE": val,
+            }
+            settings = load_settings(env=env)
+            assert settings.low_memory_mode is True
+
+    def test_low_memory_mode_invalid_rejected(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "LOW_MEMORY_MODE": "invalid_mode",
+        }
+        with pytest.raises(ConfigError, match="LOW_MEMORY_MODE must be a boolean value"):
+            load_settings(env=env)

@@ -45,6 +45,7 @@ def make_test_settings(**overrides) -> Settings:
         "runtime_artifact_dir": None,
         "browser_storage_state_path": None,
         "log_level": "INFO",
+        "low_memory_mode": True,
     }
     defaults.update(overrides)
     return Settings(**defaults)

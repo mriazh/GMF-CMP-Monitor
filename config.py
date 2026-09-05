@@ -106,6 +106,7 @@ class Settings:
     viewport_height: int = 1080
     viewport_auto: bool = False
     page_zoom_percent: int = 67
+    low_memory_mode: bool = True
 
 
 def _strip_quotes(value: str) -> str:
@@ -319,6 +320,7 @@ def load_settings(
     page_zoom_percent = _positive_int(values, "PAGE_ZOOM_PERCENT", 67)
     if not (25 <= page_zoom_percent <= 200):
         raise ConfigError("PAGE_ZOOM_PERCENT must be between 25 and 200")
+    low_memory_mode = _boolean(values, "LOW_MEMORY_MODE", True)
     return Settings(
         cas_url=cas_url,
         cmp_products_url=cmp_products_url,
@@ -382,4 +384,5 @@ def load_settings(
         viewport_height=viewport_height,
         viewport_auto=viewport_auto,
         page_zoom_percent=page_zoom_percent,
+        low_memory_mode=low_memory_mode,
     )
