@@ -520,6 +520,45 @@ class TestStartupDashboardNavigationRecovery:
 
     @patch("main.time.sleep")
     @patch("main.navigate_to_dashboard")
+    def test_startup_navigation_handles_authentication_required(self, mock_navigate, mock_sleep):
+        from dashboard_monitor import AuthenticationRequiredError
+
+        mock_navigate.side_effect = [
+            AuthenticationRequiredError("Session expired during nav"),
+            None,
+        ]
+
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap = MagicMock()
+                mock_imap_class.return_value = mock_imap
+
+                with patch("main.authenticate_cmp") as mock_auth:
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        mock_monitor = MagicMock()
+                        mock_monitor.monitor_once.side_effect = KeyboardInterrupt()
+                        mock_monitor_class.return_value = mock_monitor
+
+                        import main
+                        result = main.main(env=TEST_ENV)
+
+                        assert result == 0
+                        assert mock_navigate.call_count == 2
+                        assert mock_auth.call_count == 2
+                        mock_monitor_class.assert_called_once()
+
+    @patch("main.time.sleep")
+    @patch("main.navigate_to_dashboard")
     def test_startup_navigation_exhausts_retries_returns_error(self, mock_navigate, mock_sleep):
         from dashboard_monitor import RecoveryError
 

@@ -19,6 +19,7 @@ from playwright.sync_api import sync_playwright
 from cmp_auth import AuthenticationError, authenticate_cmp
 from config import ConfigError, load_settings
 from dashboard_monitor import (
+    AuthenticationRequiredError,
     ContinuousMonitor,
     RecoveryError,
     RecoveryExhaustedError,
@@ -298,11 +299,43 @@ def main(
             connectivity.finish_authentication()
             log.info("WARP full-tunnel validation successful")
 
+        def restore_auth_connectivity() -> None:
+            _safe_disconnect(imap_client, "IMAP client")
+            if connectivity_factory or settings.checkpoint_trac_path is not None or settings.warp_cli_path is not None:
+                connectivity.prepare_reauthentication()
+            imap_client.connect()
+
+        def finish_reauthentication() -> None:
+            _safe_disconnect(imap_client, "IMAP client")
+            if connectivity_factory or settings.checkpoint_trac_path is not None or settings.warp_cli_path is not None:
+                connectivity.finish_authentication()
+
         for attempt in range(1, settings.recovery_retry_limit + 1):
             try:
                 navigate_to_dashboard(page, settings)
                 log.info("Navigated to dashboard")
                 break
+            except AuthenticationRequiredError as exc:
+                log.warning(
+                    "Authentication required during startup dashboard navigation (attempt %d/%d); re-authenticating",
+                    attempt,
+                    settings.recovery_retry_limit,
+                )
+                if attempt >= settings.recovery_retry_limit:
+                    log.error(
+                        "Startup dashboard navigation recovery exhausted (%s)",
+                        type(exc).__name__,
+                    )
+                    return 1
+                restore_auth_connectivity()
+                authenticate_cmp(
+                    settings=settings,
+                    otp_provider=imap_client,
+                    page=page,
+                    clock=clock,
+                    on_otp_submitted=_on_otp_submitted,
+                )
+                log.info("Startup re-authentication successful")
             except RecoveryError as exc:
                 log.warning(
                     "Startup dashboard navigation attempt %d/%d failed",
@@ -316,17 +349,6 @@ def main(
                     )
                     return 1
                 time.sleep(settings.recovery_backoff_seconds)
-
-        def restore_auth_connectivity() -> None:
-            _safe_disconnect(imap_client, "IMAP client")
-            if connectivity_factory or settings.checkpoint_trac_path is not None or settings.warp_cli_path is not None:
-                connectivity.prepare_reauthentication()
-            imap_client.connect()
-
-        def finish_reauthentication() -> None:
-            _safe_disconnect(imap_client, "IMAP client")
-            if connectivity_factory or settings.checkpoint_trac_path is not None or settings.warp_cli_path is not None:
-                connectivity.finish_authentication()
 
         monitor = ContinuousMonitor(
             settings=settings,

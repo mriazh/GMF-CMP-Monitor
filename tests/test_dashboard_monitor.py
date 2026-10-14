@@ -2400,3 +2400,77 @@ class TestReloginLifecycleHooks:
             monitor._perform_relogin()
 
         assert events == ["before_relogin", "authenticate_cmp", "after_relogin"]
+
+    def test_relogin_and_navigate_succeeds_when_consecutive_recoveries_at_limit(self):
+        """_relogin_and_navigate resets consecutive recoveries and succeeds even if counter is at limit."""
+        from unittest.mock import patch
+        from dashboard_monitor import ContinuousMonitor
+
+        settings = make_test_settings(recovery_retry_limit=3)
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+
+        def fake_authenticate_cmp(settings, otp_provider, page, clock=None, on_otp_submitted=None):
+            page.current_url = settings.cmp_dashboard_url
+            page.set_hash("#!dashboard")
+            page.set_dashboard_ready(True)
+            return True
+
+        monitor = ContinuousMonitor(
+            settings=settings,
+            page=page,
+            otp_provider=FakeOtpProvider(),
+            clock=FakeClock(),
+        )
+        monitor._consecutive_recoveries = settings.recovery_retry_limit
+
+        with patch("dashboard_monitor.authenticate_cmp", side_effect=fake_authenticate_cmp):
+            result = monitor._relogin_and_navigate()
+
+        assert result is True
+        assert monitor._consecutive_recoveries == 0
+
+    def test_target_closed_error_during_recovery_reload_aborts_immediately(self):
+        """TargetClosedError during recovery reload aborts immediately with RecoveryExhaustedError."""
+        from dashboard_monitor import ContinuousMonitor, RecoveryExhaustedError
+
+        class TargetClosedError(Exception):
+            pass
+
+        settings = make_test_settings()
+        page = FakePage("https://unknown.com")
+        page.context = object()
+
+        def failing_reload(**kwargs):
+            raise TargetClosedError("Target page, context or browser has been closed")
+
+        page.reload = failing_reload
+
+        monitor = ContinuousMonitor(
+            settings=settings,
+            page=page,
+            otp_provider=FakeOtpProvider(),
+            clock=FakeClock(),
+        )
+
+        with pytest.raises(RecoveryExhaustedError, match="Browser window or target was closed"):
+            monitor._recover_to_dashboard()
+
+    def test_target_closed_error_during_vaadin_loading_locator_aborts_immediately(self):
+        """TargetClosedError during locator inspection aborts immediately with RecoveryExhaustedError."""
+        from dashboard_monitor import _wait_for_vaadin_loading, RecoveryExhaustedError
+
+        class TargetClosedError(Exception):
+            pass
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.context = object()
+
+        def failing_locator(*args, **kwargs):
+            raise TargetClosedError("Target page, context or browser has been closed")
+
+        page.locator = failing_locator
+
+        with pytest.raises(RecoveryExhaustedError, match="Browser window or target was closed"):
+            _wait_for_vaadin_loading(page, settings, FakeClock(), timeout_seconds=10.0)

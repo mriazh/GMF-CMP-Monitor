@@ -113,6 +113,16 @@ class AuthenticationRequiredError(RecoveryError):
     """
 
 
+def _is_target_closed_error(exc: BaseException) -> bool:
+    """True if exc is a Playwright target/window closed error."""
+    exc_type = type(exc).__name__
+    exc_str = str(exc).lower()
+    return "targetclosederror" in exc_type.lower() or (
+        exc_type in ("TargetClosedError", "Error")
+        and "target page, context or browser has been closed" in exc_str
+    )
+
+
 def _is_approved_origin(parsed: ParseResult) -> bool:
     """True if parsed URL matches the approved HTTPS origin strictly.
 
@@ -332,7 +342,10 @@ def _visible_dashboard_menu(page: object) -> object | None:
             if hasattr(loc, "is_visible") and loc.is_visible():
                 return loc
         return None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if _is_target_closed_error(exc):
+            log.error("Browser target or window has been closed; aborting recovery")
+            raise RecoveryExhaustedError("Browser window or target was closed") from exc
         return None
 
 
@@ -388,7 +401,10 @@ def _wait_for_vaadin_loading(page: object, settings: Settings, clock: Clock, tim
                 captions = page.locator("span.main-menu-item-caption").count() if hasattr(page, "locator") else 0
                 btns = page.locator("div.main-menu-item").count() if hasattr(page, "locator") else 0
                 log.info("SPA loading check: url=%s captions=%d items=%d", current_url, captions, btns)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                if _is_target_closed_error(exc):
+                    log.error("Browser target or window has been closed; aborting recovery")
+                    raise RecoveryExhaustedError("Browser window or target was closed") from exc
                 pass
         # If after 25s the SPA menu hasn't mounted, perform a reload of the page
         # because the Vaadin client bootstrap script may have stalled on the initial redirect.
@@ -397,7 +413,10 @@ def _wait_for_vaadin_loading(page: object, settings: Settings, clock: Clock, tim
             try:
                 log.info("SPA menu not loaded yet; performing reload of products page (attempting mount recovery)")
                 page.reload(timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                if _is_target_closed_error(exc):
+                    log.error("Browser target or window has been closed; aborting recovery")
+                    raise RecoveryExhaustedError("Browser window or target was closed") from exc
                 pass
         clock.sleep(POLL_INTERVAL_SECONDS)
     elapsed = clock.now() - start_time
@@ -619,11 +638,16 @@ class ContinuousMonitor:
                     log.info("Reloading page to clear any dead session overlay or hung Vaadin state before recovery attempt %d", attempt)
                     self._page.reload(timeout=self._settings.navigation_timeout_ms, wait_until="domcontentloaded")
                 except Exception as reload_exc:  # noqa: BLE001
+                    if _is_target_closed_error(reload_exc):
+                        log.error("Browser target or window has been closed; aborting recovery")
+                        raise RecoveryExhaustedError("Browser window or target was closed") from reload_exc
                     log.warning("Recovery page reload non-fatal error: %s", type(reload_exc).__name__)
 
             # Try to navigate back to dashboard via the real SPA menu click.
             try:
                 navigate_to_dashboard(self._page, self._settings, self._clock)
+            except RecoveryExhaustedError:
+                raise
             except AuthenticationRequiredError:
                 # Preserve the normal relogin path for session expiry during recovery.
                 # MUST appear before except RecoveryError because AuthenticationRequiredError subclasses RecoveryError.
@@ -641,6 +665,9 @@ class ContinuousMonitor:
                             wait_until="domcontentloaded",
                         )
                     except Exception as cas_nav_exc:  # noqa: BLE001
+                        if _is_target_closed_error(cas_nav_exc):
+                            log.error("Browser target or window has been closed; aborting recovery")
+                            raise RecoveryExhaustedError("Browser window or target was closed") from cas_nav_exc
                         log.warning(
                             "Navigation to CAS URL during hardened recovery failed: %s (%s)",
                             type(cas_nav_exc).__name__,
@@ -657,6 +684,9 @@ class ContinuousMonitor:
                 log.warning("Dashboard recovery attempt failed; retrying within configured limit")
                 continue
             except Exception as nav_exc:
+                if _is_target_closed_error(nav_exc):
+                    log.error("Browser target or window has been closed; aborting recovery")
+                    raise RecoveryExhaustedError("Browser window or target was closed") from nav_exc
                 log.error("Navigation to dashboard failed during recovery: %s", type(nav_exc).__name__)
                 if self._consecutive_recoveries >= self._settings.recovery_retry_limit:
                     log.error(
@@ -1003,21 +1033,31 @@ class ContinuousMonitor:
 
     def _relogin_and_navigate(self) -> bool:
         """Re-authenticate and navigate to the verified dashboard."""
+        self._consecutive_recoveries = 0
+        attempts = 0
         while True:
-            self._check_recovery_limit()
+            if attempts >= self._settings.recovery_retry_limit:
+                log.error("Recovery limit (%d) exceeded, terminating", self._settings.recovery_retry_limit)
+                raise RecoveryExhaustedError(
+                    f"Maximum recovery attempts ({self._settings.recovery_retry_limit}) exceeded"
+                )
             try:
                 self._perform_relogin()
                 self._consecutive_recoveries = 0
                 return True
             except (AuthenticationError, AuthenticationRequiredError, RecoveryError) as exc:
                 log.error("Re-authentication attempt failed: %s", type(exc).__name__)
-                self._consecutive_recoveries += 1
-                self._check_recovery_limit()
+                attempts += 1
+                if attempts >= self._settings.recovery_retry_limit:
+                    log.error("Recovery limit (%d) exceeded, terminating", self._settings.recovery_retry_limit)
+                    raise RecoveryExhaustedError(
+                        f"Maximum recovery attempts ({self._settings.recovery_retry_limit}) exceeded"
+                    )
                 backoff = self._settings.recovery_backoff_seconds
                 log.info(
                     "Waiting %.0fs before re-authentication attempt (%d/%d)",
                     backoff,
-                    self._consecutive_recoveries,
+                    attempts,
                     self._settings.recovery_retry_limit,
                 )
                 self._clock.sleep(backoff)
