@@ -88,6 +88,8 @@ class Settings:
     warp_reuse_existing: bool = True
     warp_disconnect_on_exit: bool = True
     warp_trace_url: str = "https://www.cloudflare.com/cdn-cgi/trace"
+    warp_restart_on_startup: bool = True
+    preflight_timeout_seconds: float = 10.0
     office_network_probe_host: str = "mail.company.local"
     office_network_probe_port: int = 993
     office_network_probe_secondary_url: str | None = None
@@ -156,7 +158,9 @@ def _boolean(values: Mapping[str, str], key: str, default: bool = True) -> bool:
         return True
     if value in {"0", "false", "no", "off"}:
         return False
-    raise ConfigError(f"{key} must be a boolean value (true/false, yes/no, on/off, 1/0)")
+    raise ConfigError(
+        f"{key} must be a boolean value (true/false, yes/no, on/off, 1/0)"
+    )
 
 
 def _positive_int(values: Mapping[str, str], key: str, default: int) -> int:
@@ -216,7 +220,11 @@ def _configured_executable(values: Mapping[str, str], key: str) -> Path | str | 
 
 def _artifact_dir(values: Mapping[str, str]) -> Path:
     configured = _optional(values, "RUNTIME_ARTIFACT_DIR", "")
-    path = Path(configured) if configured else Path(tempfile.gettempdir()) / "gmf-cmp-monitor" / "artifacts"
+    path = (
+        Path(configured)
+        if configured
+        else Path(tempfile.gettempdir()) / "gmf-cmp-monitor" / "artifacts"
+    )
     return _external_path(path, "RUNTIME_ARTIFACT_DIR")
 
 
@@ -253,8 +261,12 @@ def load_settings(
     """Load and validate settings from environment and an optional dotenv file."""
     values = _environment(env, env_file)
     cas_url = _validate_cmp_url(_value(values, "CMP_CAS_URL"), "CMP_CAS_URL")
-    cmp_products_url = _validate_cmp_url(_value(values, "CMP_PRODUCTS_URL"), "CMP_PRODUCTS_URL")
-    cmp_dashboard_url = _validate_cmp_url(_value(values, "CMP_DASHBOARD_URL"), "CMP_DASHBOARD_URL")
+    cmp_products_url = _validate_cmp_url(
+        _value(values, "CMP_PRODUCTS_URL"), "CMP_PRODUCTS_URL"
+    )
+    cmp_dashboard_url = _validate_cmp_url(
+        _value(values, "CMP_DASHBOARD_URL"), "CMP_DASHBOARD_URL"
+    )
     tls_mode = _optional(values, "IMAP_TLS_MODE", "imaps").lower()
     if tls_mode not in {"imaps", "starttls"}:
         raise ConfigError("IMAP_TLS_MODE must be either imaps or starttls")
@@ -262,12 +274,20 @@ def load_settings(
     subject = _optional(values, "OTP_SUBJECT", EXACT_OTP_SUBJECT)
     if subject != EXACT_OTP_SUBJECT:
         raise ConfigError("OTP_SUBJECT must exactly match the approved CMP subject")
-    run_start_timezone = _validate_timezone(_optional(values, "RUN_START_TIMEZONE", DEFAULT_RUN_START_TIMEZONE))
+    run_start_timezone = _validate_timezone(
+        _optional(values, "RUN_START_TIMEZONE", DEFAULT_RUN_START_TIMEZONE)
+    )
     storage_state = _optional(values, "BROWSER_STORAGE_STATE_PATH", "")
-    storage_state_path = _external_path(Path(storage_state), "BROWSER_STORAGE_STATE_PATH") if storage_state else None
+    storage_state_path = (
+        _external_path(Path(storage_state), "BROWSER_STORAGE_STATE_PATH")
+        if storage_state
+        else None
+    )
     log_level = _optional(values, "LOG_LEVEL", "INFO").upper()
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
-        raise ConfigError("LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL")
+        raise ConfigError(
+            "LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
+        )
     imap_host = _optional(values, "IMAP_HOST", "mail.company.local")
     if not imap_host:
         raise ConfigError("IMAP_HOST must not be empty")
@@ -281,11 +301,15 @@ def load_settings(
     checkpoint_trac_path = _configured_executable(values, "CHECKPOINT_TRAC_PATH")
     if checkpoint_trac_path is None:
         checkpoint_trac_path = _configured_executable(values, "CHECKPOINT_CLI_PATH")
-    checkpoint_auth_mode = _optional(values, "CHECKPOINT_AUTH_MODE", "client_managed").lower()
+    checkpoint_auth_mode = _optional(
+        values, "CHECKPOINT_AUTH_MODE", "client_managed"
+    ).lower()
     if checkpoint_auth_mode not in {"client_managed", "credentials"}:
         raise ConfigError("CHECKPOINT_AUTH_MODE must be client_managed or credentials")
     if _boolean(values, "CHECKPOINT_ALLOW_INTERACTIVE", False):
-        raise ConfigError("CHECKPOINT_ALLOW_INTERACTIVE must remain false; interactive VPN is disabled")
+        raise ConfigError(
+            "CHECKPOINT_ALLOW_INTERACTIVE must remain false; interactive VPN is disabled"
+        )
     checkpoint_username: SecretValue | None = None
     checkpoint_password: SecretValue | None = None
     if checkpoint_auth_mode == "credentials":
@@ -302,9 +326,15 @@ def load_settings(
         raise ConfigError("WARP_PROXY_PORT must be between 1024 and 65535")
     if _boolean(values, "WARP_ALLOW_DNS_ONLY", False):
         raise ConfigError("WARP_ALLOW_DNS_ONLY must remain false")
-    warp_trace_url = _optional(values, "WARP_TRACE_URL", "https://www.cloudflare.com/cdn-cgi/trace")
+    warp_trace_url = _optional(
+        values, "WARP_TRACE_URL", "https://www.cloudflare.com/cdn-cgi/trace"
+    )
     trace = urlparse(warp_trace_url)
-    if trace.scheme != "https" or trace.hostname not in APPROVED_WARP_TRACE_HOSTS or trace.port is not None:
+    if (
+        trace.scheme != "https"
+        or trace.hostname not in APPROVED_WARP_TRACE_HOSTS
+        or trace.port is not None
+    ):
         raise ConfigError("WARP_TRACE_URL must use an approved HTTPS Cloudflare host")
     probe_host = _optional(values, "OFFICE_NETWORK_PROBE_HOST", imap_host)
     if not probe_host:
@@ -341,7 +371,9 @@ def load_settings(
         browser_timeout_ms=_positive_int(values, "BROWSER_TIMEOUT_MS", 30000),
         navigation_timeout_ms=_positive_int(values, "NAVIGATION_TIMEOUT_MS", 90000),
         otp_form_timeout_ms=_positive_int(values, "OTP_FORM_TIMEOUT_MS", 60000),
-        otp_clock_skew_tolerance_seconds=_positive_int(values, "OTP_CLOCK_SKEW_TOLERANCE_SECONDS", 120),
+        otp_clock_skew_tolerance_seconds=_positive_int(
+            values, "OTP_CLOCK_SKEW_TOLERANCE_SECONDS", 120
+        ),
         refresh_interval_seconds=_positive_int(values, "REFRESH_INTERVAL_SECONDS", 60),
         recovery_retry_limit=_positive_int(values, "RECOVERY_RETRY_LIMIT", 3),
         recovery_backoff_seconds=_positive_int(values, "RECOVERY_BACKOFF_SECONDS", 5),
@@ -366,18 +398,38 @@ def load_settings(
         warp_reuse_existing=_boolean(values, "WARP_REUSE_EXISTING", True),
         warp_disconnect_on_exit=_boolean(values, "WARP_DISCONNECT_ON_EXIT", True),
         warp_trace_url=warp_trace_url,
+        warp_restart_on_startup=_boolean(values, "WARP_RESTART_ON_STARTUP", True),
+        preflight_timeout_seconds=_positive_float(
+            values, "PREFLIGHT_TIMEOUT_SECONDS", 10.0
+        ),
         office_network_probe_host=probe_host,
-        office_network_probe_port=_positive_int(values, "OFFICE_NETWORK_PROBE_PORT", 993),
+        office_network_probe_port=_positive_int(
+            values, "OFFICE_NETWORK_PROBE_PORT", 993
+        ),
         office_network_probe_secondary_url=secondary_url,
-        office_network_probe_timeout_seconds=_positive_float(values, "OFFICE_NETWORK_PROBE_TIMEOUT_SECONDS", 10.0),
-        checkpoint_connect_timeout_seconds=_positive_float(values, "CHECKPOINT_CONNECT_TIMEOUT_SECONDS", 60.0),
-        checkpoint_status_poll_interval_seconds=_positive_float(values, "CHECKPOINT_STATUS_POLL_INTERVAL_SECONDS", 2.0),
+        office_network_probe_timeout_seconds=_positive_float(
+            values, "OFFICE_NETWORK_PROBE_TIMEOUT_SECONDS", 10.0
+        ),
+        checkpoint_connect_timeout_seconds=_positive_float(
+            values, "CHECKPOINT_CONNECT_TIMEOUT_SECONDS", 60.0
+        ),
+        checkpoint_status_poll_interval_seconds=_positive_float(
+            values, "CHECKPOINT_STATUS_POLL_INTERVAL_SECONDS", 2.0
+        ),
         checkpoint_retry_limit=_positive_int(values, "CHECKPOINT_RETRY_LIMIT", 3),
-        checkpoint_disconnect_timeout_seconds=_positive_float(values, "CHECKPOINT_DISCONNECT_TIMEOUT_SECONDS", 30.0),
-        warp_connect_timeout_seconds=_positive_float(values, "WARP_CONNECT_TIMEOUT_SECONDS", 60.0),
-        warp_status_poll_interval_seconds=_positive_float(values, "WARP_STATUS_POLL_INTERVAL_SECONDS", 2.0),
+        checkpoint_disconnect_timeout_seconds=_positive_float(
+            values, "CHECKPOINT_DISCONNECT_TIMEOUT_SECONDS", 30.0
+        ),
+        warp_connect_timeout_seconds=_positive_float(
+            values, "WARP_CONNECT_TIMEOUT_SECONDS", 60.0
+        ),
+        warp_status_poll_interval_seconds=_positive_float(
+            values, "WARP_STATUS_POLL_INTERVAL_SECONDS", 2.0
+        ),
         warp_retry_limit=_positive_int(values, "WARP_RETRY_LIMIT", 3),
-        warp_trace_timeout_seconds=_positive_float(values, "WARP_TRACE_TIMEOUT_SECONDS", 15.0),
+        warp_trace_timeout_seconds=_positive_float(
+            values, "WARP_TRACE_TIMEOUT_SECONDS", 15.0
+        ),
         dashboard_retry_limit=_positive_int(values, "DASHBOARD_RETRY_LIMIT", 3),
         auth_cycle_retry_limit=_positive_int(values, "AUTH_CYCLE_RETRY_LIMIT", 3),
         viewport_width=viewport_width,

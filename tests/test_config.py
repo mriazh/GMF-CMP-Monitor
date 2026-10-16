@@ -68,7 +68,9 @@ class TestApprovedUrls:
         }
         settings = load_settings(env=env)
         assert settings.cmp_products_url == "https://ep.iotcc.telkomsel.com/#!products"
-        assert settings.cmp_dashboard_url == "https://ep.iotcc.telkomsel.com/#!dashboard"
+        assert (
+            settings.cmp_dashboard_url == "https://ep.iotcc.telkomsel.com/#!dashboard"
+        )
 
     def test_cmp_url_with_empty_port_rejected(self):
         env = {
@@ -192,7 +194,10 @@ class TestEnvFileLoading:
         )
         settings = load_settings(env_file=env_file)
         assert settings.cmp_username.get_secret_value() == "testuser"
-        assert str(settings.checkpoint_trac_path) == "C:\\Program Files (x86)\\CheckPoint\\trac.exe"
+        assert (
+            str(settings.checkpoint_trac_path)
+            == "C:\\Program Files (x86)\\CheckPoint\\trac.exe"
+        )
 
     def test_environment_loading_does_not_discover_dotenv(self, tmp_path, monkeypatch):
         for key in (
@@ -211,6 +216,7 @@ class TestEnvFileLoading:
 
         with pytest.raises(ConfigError, match="CMP_CAS_URL"):
             load_settings()
+
     def test_root_dotenv_validation(self):
         """Validate the root .env file if present in the repository."""
         env_path = PROJECT_ROOT / ".env"
@@ -259,6 +265,7 @@ class TestEnvFileLoading:
         monkeypatch.setenv("LOG_LEVEL", "WARNING")
         settings = load_settings(env_file=dot_env, env={"LOG_LEVEL": "DEBUG"})
         assert settings.log_level == "DEBUG"
+
 
 class TestTimezoneValidation:
     """Tests for timezone validation."""
@@ -558,7 +565,6 @@ class TestRuntimeSettings:
         assert settings.refresh_interval_seconds == 60
         assert settings.recovery_retry_limit == 3
         assert settings.recovery_backoff_seconds == 5
-
 
 
 class TestCheckpointConfig:
@@ -985,7 +991,9 @@ class TestPageZoomPercentValidation:
             "IMAP_PASSWORD": "imappass",
             "PAGE_ZOOM_PERCENT": "10",
         }
-        with pytest.raises(ConfigError, match="PAGE_ZOOM_PERCENT must be between 25 and 200"):
+        with pytest.raises(
+            ConfigError, match="PAGE_ZOOM_PERCENT must be between 25 and 200"
+        ):
             load_settings(env=env)
 
 
@@ -1059,7 +1067,9 @@ class TestWarpModeValidation:
             "IMAP_PASSWORD": "imappass",
             "WARP_PROXY_PORT": "80",
         }
-        with pytest.raises(ConfigError, match="WARP_PROXY_PORT must be between 1024 and 65535"):
+        with pytest.raises(
+            ConfigError, match="WARP_PROXY_PORT must be between 1024 and 65535"
+        ):
             load_settings(env=env)
 
 
@@ -1109,7 +1119,7 @@ class TestLowMemoryModeValidation:
             settings = load_settings(env=env)
             assert settings.low_memory_mode is True
 
-    def test_low_memory_mode_invalid_rejected(self):
+    def test_warp_restart_on_startup_and_preflight_timeout_defaults_and_parse(self):
         env = {
             "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
             "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
@@ -1118,7 +1128,48 @@ class TestLowMemoryModeValidation:
             "CMP_PASSWORD": "testpass",
             "IMAP_USERNAME": "imapuser",
             "IMAP_PASSWORD": "imappass",
-            "LOW_MEMORY_MODE": "invalid_mode",
         }
-        with pytest.raises(ConfigError, match="LOW_MEMORY_MODE must be a boolean value"):
+        settings = load_settings(env=env)
+        assert settings.warp_restart_on_startup is True
+        assert settings.preflight_timeout_seconds == 10.0
+
+        env_custom = {
+            **env,
+            "WARP_RESTART_ON_STARTUP": "false",
+            "PREFLIGHT_TIMEOUT_SECONDS": "5.5",
+        }
+        settings_custom = load_settings(env=env_custom)
+        assert settings_custom.warp_restart_on_startup is False
+        assert settings_custom.preflight_timeout_seconds == 5.5
+
+    def test_warp_restart_on_startup_rejects_invalid(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "WARP_RESTART_ON_STARTUP": "maybe",
+        }
+        with pytest.raises(
+            ConfigError, match="WARP_RESTART_ON_STARTUP must be a boolean value"
+        ):
+            load_settings(env=env)
+
+    def test_preflight_timeout_rejects_invalid(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "PREFLIGHT_TIMEOUT_SECONDS": "-1",
+        }
+        with pytest.raises(
+            ConfigError, match="PREFLIGHT_TIMEOUT_SECONDS must be a positive number"
+        ):
             load_settings(env=env)

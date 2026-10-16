@@ -226,7 +226,9 @@ def test_warp_connect_and_disconnect_are_owned():
     def runner(command, **kwargs):
         calls.append(command)
         if command[-1] == "status":
-            return SimpleNamespace(returncode=0, stdout=status_outputs.pop(0), stderr="")
+            return SimpleNamespace(
+                returncode=0, stdout=status_outputs.pop(0), stderr=""
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     client = WarpClient(
@@ -273,7 +275,7 @@ def test_warp_trace_requires_warp_on_and_does_not_log_body(caplog):
         status = 200
 
         def read(self):
-            return b"ip=203.0.113.10\nwarp=on\n" 
+            return b"ip=203.0.113.10\nwarp=on\n"
 
         def __enter__(self):
             return self
@@ -288,7 +290,9 @@ def test_warp_trace_requires_warp_on_and_does_not_log_body(caplog):
             stderr="",
         )
 
-    client = WarpClient(settings(), runner=runner, opener=lambda request, timeout: Response())
+    client = WarpClient(
+        settings(), runner=runner, opener=lambda request, timeout: Response()
+    )
     client.validate()
     assert "203.0.113.10" not in caplog.text
 
@@ -314,7 +318,9 @@ def test_warp_trace_rejects_missing_confirmation():
         )
 
     with pytest.raises(WarpValidationError):
-        WarpClient(settings(), runner=runner, opener=lambda request, timeout: Response()).validate()
+        WarpClient(
+            settings(), runner=runner, opener=lambda request, timeout: Response()
+        ).validate()
 
 
 def test_config_loads_vpn_fields_and_quoted_paths(tmp_path):
@@ -434,7 +440,9 @@ def test_checkpoint_connect_retries_and_is_bounded():
         nonlocal attempts
         calls.append(command)
         if command[1] == "info":
-            return SimpleNamespace(returncode=0, stdout="Conn VPN-CORP:\n Status: Idle\n", stderr="")
+            return SimpleNamespace(
+                returncode=0, stdout="Conn VPN-CORP:\n Status: Idle\n", stderr=""
+            )
         attempts += 1
         return SimpleNamespace(returncode=1, stdout="", stderr="failure")
 
@@ -449,7 +457,10 @@ def test_checkpoint_connect_retries_and_is_bounded():
 
     assert attempts == 2
     assert client.owned is False
-    assert all(command[1:] != ["connect", "-s", "VPN-CORP", "-g", "CORP-GW01", "cmp-pass"] for command in calls)
+    assert all(
+        command[1:] != ["connect", "-s", "VPN-CORP", "-g", "CORP-GW01", "cmp-pass"]
+        for command in calls
+    )
 
 
 def test_warp_connect_retries_and_is_bounded():
@@ -487,7 +498,9 @@ def test_warp_connect_polls_disconnected_then_connected():
     def runner(command, **kwargs):
         calls.append(command)
         if command[-1] == "status":
-            return SimpleNamespace(returncode=0, stdout=status_outputs.pop(0), stderr="")
+            return SimpleNamespace(
+                returncode=0, stdout=status_outputs.pop(0), stderr=""
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     def sleep(seconds):
@@ -520,7 +533,9 @@ def test_warp_connect_timeout_is_bounded():
     def runner(command, **kwargs):
         calls.append(command)
         if command[-1] == "status":
-            return SimpleNamespace(returncode=0, stdout="Status update: Disconnected\n", stderr="")
+            return SimpleNamespace(
+                returncode=0, stdout="Status update: Disconnected\n", stderr=""
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     def sleep(seconds):
@@ -607,7 +622,9 @@ def test_checkpoint_retries_are_bounded_and_cleanup_owned_connection():
 
     checkpoint = Checkpoint()
     controller = ConnectivityController(
-        settings(CHECKPOINT_RETRY_LIMIT="2", CHECKPOINT_STATUS_POLL_INTERVAL_SECONDS="0.1"),
+        settings(
+            CHECKPOINT_RETRY_LIMIT="2", CHECKPOINT_STATUS_POLL_INTERVAL_SECONDS="0.1"
+        ),
         Probe(),
         checkpoint,
         object(),
@@ -668,9 +685,13 @@ def test_warp_status_queries_mode_from_settings_when_status_lacks_mode():
     def runner(command, **kwargs):
         calls.append(command)
         if command[-1] == "status":
-            return SimpleNamespace(returncode=0, stdout="Status update: Connected\n", stderr="")
+            return SimpleNamespace(
+                returncode=0, stdout="Status update: Connected\n", stderr=""
+            )
         if command[-1] == "settings":
-            return SimpleNamespace(returncode=0, stdout="(default)\tMode: Warp\n", stderr="")
+            return SimpleNamespace(
+                returncode=0, stdout="(default)\tMode: Warp\n", stderr=""
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     client = WarpClient(settings(WARP_CLI_PATH="warp-cli"), runner=runner)
@@ -692,7 +713,9 @@ def test_warp_connect_in_proxy_mode_configures_mode_and_port():
     def runner(command, **kwargs):
         calls.append(command)
         if command[-1] == "status":
-            return SimpleNamespace(returncode=0, stdout=status_outputs.pop(0), stderr="")
+            return SimpleNamespace(
+                returncode=0, stdout=status_outputs.pop(0), stderr=""
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     client = WarpClient(
@@ -716,10 +739,20 @@ def test_warp_connect_in_proxy_mode_configures_mode_and_port():
     assert calls[4][1:] == ["--no-ansi", "status"]
 
 
-def test_warp_validate_in_proxy_mode():
+def test_warp_restart_fresh_and_preflight_check():
+    calls: list[list[str]] = []
+    status_outputs = [
+        "Status update: Connected\nMode: Proxy\n",
+        "Status update: Disconnected\n",
+        "Status update: Connected\nMode: Proxy\n",
+    ]
+
     def runner(command, **kwargs):
-        if command[-1] == "status":
-            return SimpleNamespace(returncode=0, stdout="Status update: Connected\nMode: Proxy\n", stderr="")
+        calls.append(command)
+        if "status" in command and status_outputs:
+            return SimpleNamespace(
+                returncode=0, stdout=status_outputs.pop(0), stderr=""
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     client = WarpClient(
@@ -729,9 +762,20 @@ def test_warp_validate_in_proxy_mode():
             WARP_PROXY_PORT="40000",
         ),
         runner=runner,
+        sleeper=lambda _: None,
     )
+    client._validate_socks5_proxy = lambda: "ip=203.0.113.5\nloc=CGK\nwarp=on\n"
+    client.owned = True
 
-    client._validate_socks5_proxy = lambda: "ip=1.2.3.4\nwarp=on\n"
-    client.validate()
+    # Test restart_fresh
+    client.restart_fresh()
+    assert any("disconnect" in cmd[1] for cmd in calls if len(cmd) > 1)
+    assert any("connect" in cmd[1] for cmd in calls if len(cmd) > 1)
 
-
+    # Test preflight_check
+    res = client.preflight_check()
+    assert res.warp_status == "on"
+    assert res.ip == "203.0.113.0"  # /24 redacted
+    assert res.loc == "CGK"
+    assert res.dns_resolved is True
+    assert res.cas_status_code in range(200, 500)

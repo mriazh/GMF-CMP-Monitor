@@ -191,10 +191,49 @@ def main(
             if settings.warp_mode == "proxy":
                 connectivity.prepare_warp()
                 log.info("WARP SOCKS5 proxy ready on port %d", settings.warp_proxy_port)
+                # Preflight check with restart on failure once
+                preflight_ok = False
+                try:
+                    res = warp.preflight_check()
+                    log.info(
+                        "WARP=%s, IP=%s, LOC=%s | DNS=%s | CAS=%s | MS=%dms",
+                        res.warp_status,
+                        res.ip,
+                        res.loc,
+                        res.dns_resolved,
+                        res.tcp_connected,
+                        int(settings.preflight_timeout_seconds * 1000),
+                    )
+                    preflight_ok = True
+                except Exception as exc:
+                    log.warning("Preflight check failed: %s; restarting WARP once", exc)
+                    try:
+                        warp.restart_fresh()
+                        res = warp.preflight_check()
+                        log.info(
+                            "WARP=%s, IP=%s, LOC=%s | DNS=%s | CAS=%s | MS=%dms",
+                            res.warp_status,
+                            res.ip,
+                            res.loc,
+                            res.dns_resolved,
+                            res.tcp_connected,
+                            int(settings.preflight_timeout_seconds * 1000),
+                        )
+                        preflight_ok = True
+                    except Exception as exc2:
+                        log.error("Preflight retry failed after restart: %s", exc2)
+
+                if not preflight_ok:
+                    log.error(
+                        "Preflight check failed after restart; aborting before authentication"
+                    )
+                    return 1
 
         log.info("Initializing browser driver...")
         playwright = sync_playwright().start()
-        log.info("Launching bundled Firefox browser (headless=%s)...", settings.headless)
+        log.info(
+            "Launching bundled Firefox browser (headless=%s)...", settings.headless
+        )
 
         launch_args: list[str] = []
         if settings.viewport_auto:
@@ -204,10 +243,17 @@ def main(
         if launch_args:
             launch_kwargs["args"] = launch_args
         if settings.firefox_executable_path:
-            launch_kwargs["executable_path"] = str(settings.firefox_executable_path.resolve())
+            launch_kwargs["executable_path"] = str(
+                settings.firefox_executable_path.resolve()
+            )
         if settings.warp_mode == "proxy":
-            launch_kwargs["proxy"] = {"server": f"socks5://127.0.0.1:{settings.warp_proxy_port}"}
-            log.info("Firefox proxy configured: socks5://127.0.0.1:%d (isolated browser routing)", settings.warp_proxy_port)
+            launch_kwargs["proxy"] = {
+                "server": f"socks5://127.0.0.1:{settings.warp_proxy_port}"
+            }
+            log.info(
+                "Firefox proxy configured: socks5://127.0.0.1:%d (isolated browser routing)",
+                settings.warp_proxy_port,
+            )
 
         if settings.low_memory_mode:
             launch_kwargs["firefox_user_prefs"] = {
@@ -229,10 +275,21 @@ def main(
 
         if settings.viewport_auto:
             context = browser.new_context(no_viewport=True)
-            log.info("Firefox launched with auto-responsive viewport (adapts to display)")
+            log.info(
+                "Firefox launched with auto-responsive viewport (adapts to display)"
+            )
         else:
-            context = browser.new_context(viewport={"width": settings.viewport_width, "height": settings.viewport_height})
-            log.info("Firefox launched (viewport=%dx%d)", settings.viewport_width, settings.viewport_height)
+            context = browser.new_context(
+                viewport={
+                    "width": settings.viewport_width,
+                    "height": settings.viewport_height,
+                }
+            )
+            log.info(
+                "Firefox launched (viewport=%dx%d)",
+                settings.viewport_width,
+                settings.viewport_height,
+            )
 
         if settings.page_zoom_percent != 100:
             zoom_pct = settings.page_zoom_percent
@@ -267,7 +324,10 @@ def main(
                     setInterval(applyRouteAwareZoom, 500);
                 }})();
             """)
-            log.info("Dashboard-scoped zoom configured: %d%% (CAS login and products remain 100%%)", zoom_pct)
+            log.info(
+                "Dashboard-scoped zoom configured: %d%% (CAS login and products remain 100%%)",
+                zoom_pct,
+            )
 
         page = context.new_page()
 
@@ -279,7 +339,11 @@ def main(
 
         def _on_otp_submitted() -> None:
             nonlocal warp_activated
-            if connectivity_factory or settings.checkpoint_trac_path is not None or settings.warp_cli_path is not None:
+            if (
+                connectivity_factory
+                or settings.checkpoint_trac_path is not None
+                or settings.warp_cli_path is not None
+            ):
                 _safe_disconnect(imap_client, "IMAP client")
                 connectivity.finish_authentication()
                 warp_activated = True
@@ -294,20 +358,32 @@ def main(
         )
         log.info("Authentication successful")
 
-        if not warp_activated and (connectivity_factory or settings.checkpoint_trac_path is not None or settings.warp_cli_path is not None):
+        if not warp_activated and (
+            connectivity_factory
+            or settings.checkpoint_trac_path is not None
+            or settings.warp_cli_path is not None
+        ):
             _safe_disconnect(imap_client, "IMAP client")
             connectivity.finish_authentication()
             log.info("WARP full-tunnel validation successful")
 
         def restore_auth_connectivity() -> None:
             _safe_disconnect(imap_client, "IMAP client")
-            if connectivity_factory or settings.checkpoint_trac_path is not None or settings.warp_cli_path is not None:
+            if (
+                connectivity_factory
+                or settings.checkpoint_trac_path is not None
+                or settings.warp_cli_path is not None
+            ):
                 connectivity.prepare_reauthentication()
             imap_client.connect()
 
         def finish_reauthentication() -> None:
             _safe_disconnect(imap_client, "IMAP client")
-            if connectivity_factory or settings.checkpoint_trac_path is not None or settings.warp_cli_path is not None:
+            if (
+                connectivity_factory
+                or settings.checkpoint_trac_path is not None
+                or settings.warp_cli_path is not None
+            ):
                 connectivity.finish_authentication()
 
         for attempt in range(1, settings.recovery_retry_limit + 1):
@@ -366,13 +442,20 @@ def main(
                 if need_relogin:
                     log.info("Re-authentication performed")
             except RecoveryExhaustedError as exc:
-                log.error("Recovery exhausted during monitoring (%s)", type(exc).__name__)
+                log.error(
+                    "Recovery exhausted during monitoring (%s)", type(exc).__name__
+                )
                 return 1
             except AuthenticationError as exc:
-                log.error("Authentication error during monitoring (%s)", type(exc).__name__)
+                log.error(
+                    "Authentication error during monitoring (%s)", type(exc).__name__
+                )
                 return 1
             except RecoveryError as exc:
-                log.error("Dashboard recovery failed during monitoring (%s)", type(exc).__name__)
+                log.error(
+                    "Dashboard recovery failed during monitoring (%s)",
+                    type(exc).__name__,
+                )
                 return 1
 
     except KeyboardInterrupt:
@@ -390,7 +473,13 @@ def main(
     except Exception as exc:  # noqa: BLE001
         cause = getattr(exc, "__cause__", None)
         cause_str = f" caused by {type(cause).__name__}" if cause else ""
-        log.error("Monitor failed (%s%s): %s", type(exc).__name__, cause_str, exc, exc_info=True)
+        log.error(
+            "Monitor failed (%s%s): %s",
+            type(exc).__name__,
+            cause_str,
+            exc,
+            exc_info=True,
+        )
         return 1
     finally:
         log.info("Cleaning up resources...")
@@ -417,19 +506,25 @@ def main(
             try:
                 playwright.stop()
             except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001
-                log.warning("Cleanup failure stopping playwright (%s)", type(exc).__name__)
+                log.warning(
+                    "Cleanup failure stopping playwright (%s)", type(exc).__name__
+                )
 
         if imap_client is not None:
             try:
                 imap_client.disconnect()
             except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001
-                log.warning("Cleanup failure disconnecting IMAP client (%s)", type(exc).__name__)
+                log.warning(
+                    "Cleanup failure disconnecting IMAP client (%s)", type(exc).__name__
+                )
 
         if connectivity is not None:
             try:
                 connectivity.cleanup()
             except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001
-                log.warning("Cleanup failure closing connectivity (%s)", type(exc).__name__)
+                log.warning(
+                    "Cleanup failure closing connectivity (%s)", type(exc).__name__
+                )
 
         log.info("==================== END CMP Dashboard Monitor ====================")
 

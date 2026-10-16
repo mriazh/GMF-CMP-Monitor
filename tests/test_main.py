@@ -78,11 +78,13 @@ class TestNoBrowserDuringImport:
     def test_main_module_import(self):
         """Importing main should not launch a browser."""
         import main
+
         assert callable(main.main)
 
     def test_import_does_not_launch_browser(self):
         """Importing main must not launch Playwright or a browser."""
         import main
+
         # Re-execute the module while sync_playwright is mocked. If module-level
         # code launched a browser it would call sync_playwright() here.
         with patch("playwright.sync_api.sync_playwright") as mock_sync:
@@ -124,10 +126,14 @@ class TestFirefoxOnly:
                 with patch("main.authenticate_cmp"):
                     with patch("main.ContinuousMonitor") as mock_monitor_class:
                         mock_monitor = MagicMock()
-                        mock_monitor.monitor_once.side_effect = [False, KeyboardInterrupt()]
+                        mock_monitor.monitor_once.side_effect = [
+                            False,
+                            KeyboardInterrupt(),
+                        ]
                         mock_monitor_class.return_value = mock_monitor
 
                         import main
+
                         main.main(env=TEST_ENV)
 
                         # Verify Firefox was launched
@@ -137,7 +143,9 @@ class TestFirefoxOnly:
                         )
                         # Verify browser context was created with 1920x1080 viewport
 
-                        mock_browser.new_context.assert_called_once_with(viewport={"width": 1920, "height": 1080})
+                        mock_browser.new_context.assert_called_once_with(
+                            viewport={"width": 1920, "height": 1080}
+                        )
                         # Verify Chromium/Chrome/WebKit were NOT called
                         assert not mock_playwright.chromium.launch.called
                         assert not mock_playwright.webkit.launch.called
@@ -162,10 +170,14 @@ class TestFirefoxOnly:
                 with patch("main.authenticate_cmp"):
                     with patch("main.ContinuousMonitor") as mock_monitor_class:
                         mock_monitor = MagicMock()
-                        mock_monitor.monitor_once.side_effect = [False, KeyboardInterrupt()]
+                        mock_monitor.monitor_once.side_effect = [
+                            False,
+                            KeyboardInterrupt(),
+                        ]
                         mock_monitor_class.return_value = mock_monitor
 
                         import main
+
                         env = dict(TEST_ENV)
                         env["WARP_MODE"] = "proxy"
                         env["WARP_PROXY_PORT"] = "40000"
@@ -180,7 +192,9 @@ class TestFirefoxOnly:
 
 class TestInstalledFirefoxExecutable:
     @patch("main.navigate_to_dashboard")
-    def test_configured_executable_path_is_passed_to_firefox(self, mock_navigate, tmp_path):
+    def test_configured_executable_path_is_passed_to_firefox(
+        self, mock_navigate, tmp_path
+    ):
         executable = tmp_path / "firefox.exe"
         executable.write_text("test executable")
         env = dict(TEST_ENV)
@@ -194,10 +208,15 @@ class TestInstalledFirefoxExecutable:
             mock_playwright.firefox.launch.return_value = mock_browser
             mock_browser.new_context.return_value = mock_context
             mock_context.new_page.return_value = mock_page
-            with patch("main.ImapClient") as mock_imap_class, patch("main.authenticate_cmp"), patch("main.ContinuousMonitor") as monitor_class:
+            with patch("main.ImapClient") as mock_imap_class, patch(
+                "main.authenticate_cmp"
+            ), patch("main.ContinuousMonitor") as monitor_class:
                 mock_imap_class.return_value = MagicMock()
-                monitor_class.return_value.monitor_once.side_effect = KeyboardInterrupt()
+                monitor_class.return_value.monitor_once.side_effect = (
+                    KeyboardInterrupt()
+                )
                 import main
+
                 main.main(env=env)
         mock_playwright.firefox.launch.assert_called_once_with(
             headless=False,
@@ -229,13 +248,17 @@ class TestLowMemoryFirefoxProfile:
                         mock_monitor_class.return_value = mock_monitor
 
                         import main
+
                         env = dict(TEST_ENV)
                         env["LOW_MEMORY_MODE"] = "true"
                         main.main(env=env)
 
                         call_kwargs = mock_playwright.firefox.launch.call_args.kwargs
                         assert "firefox_user_prefs" in call_kwargs
-                        assert call_kwargs["firefox_user_prefs"] == EXPECTED_LOW_MEMORY_PREFS
+                        assert (
+                            call_kwargs["firefox_user_prefs"]
+                            == EXPECTED_LOW_MEMORY_PREFS
+                        )
 
     @patch("main.navigate_to_dashboard")
     def test_firefox_user_prefs_omitted_when_low_memory_mode_false(self, mock_navigate):
@@ -259,6 +282,7 @@ class TestLowMemoryFirefoxProfile:
                         mock_monitor_class.return_value = mock_monitor
 
                         import main
+
                         env = dict(TEST_ENV)
                         env["LOW_MEMORY_MODE"] = "false"
                         main.main(env=env)
@@ -289,10 +313,14 @@ class TestPlaywrightStopInvoked:
                 with patch("main.authenticate_cmp"):
                     with patch("main.ContinuousMonitor") as mock_monitor_class:
                         mock_monitor = MagicMock()
-                        mock_monitor.monitor_once.side_effect = [False, KeyboardInterrupt()]
+                        mock_monitor.monitor_once.side_effect = [
+                            False,
+                            KeyboardInterrupt(),
+                        ]
                         mock_monitor_class.return_value = mock_monitor
 
                         import main
+
                         main.main(env=TEST_ENV)
 
                         # Verify playwright.stop() was called
@@ -313,12 +341,16 @@ class TestCleanupOrder:
 
             def track_page_close():
                 cleanup_order.append("page")
+
             def track_context_close():
                 cleanup_order.append("context")
+
             def track_browser_close():
                 cleanup_order.append("browser")
+
             def track_playwright_stop():
                 cleanup_order.append("playwright")
+
             def track_imap_disconnect():
                 cleanup_order.append("imap")
 
@@ -340,14 +372,24 @@ class TestCleanupOrder:
                 with patch("main.authenticate_cmp"):
                     with patch("main.ContinuousMonitor") as mock_monitor_class:
                         mock_monitor = MagicMock()
-                        mock_monitor.monitor_once.side_effect = [False, KeyboardInterrupt()]
+                        mock_monitor.monitor_once.side_effect = [
+                            False,
+                            KeyboardInterrupt(),
+                        ]
                         mock_monitor_class.return_value = mock_monitor
 
                         import main
+
                         main.main(env=TEST_ENV)
 
                         # Verify cleanup order: page -> context -> browser -> playwright -> imap
-                        expected_order = ["page", "context", "browser", "playwright", "imap"]
+                        expected_order = [
+                            "page",
+                            "context",
+                            "browser",
+                            "playwright",
+                            "imap",
+                        ]
                         assert cleanup_order == expected_order
 
 
@@ -360,6 +402,7 @@ class TestCleanupAfterPartialInitialization:
             mock_imap_class.return_value = mock_imap
 
             import main
+
             result = main.main(env=TEST_ENV)
 
             # Should return error code
@@ -371,7 +414,9 @@ class TestCleanupAfterPartialInitialization:
         """Verify cleanup if browser launch fails."""
         with patch("main.sync_playwright") as mock_sync:
             mock_playwright = MagicMock()
-            mock_playwright.firefox.launch.side_effect = RuntimeError("Browser launch failed")
+            mock_playwright.firefox.launch.side_effect = RuntimeError(
+                "Browser launch failed"
+            )
             mock_sync.return_value.start.return_value = mock_playwright
 
             with patch("main.ImapClient") as mock_imap_class:
@@ -379,6 +424,7 @@ class TestCleanupAfterPartialInitialization:
                 mock_imap_class.return_value = mock_imap
 
                 import main
+
                 result = main.main(env=TEST_ENV)
 
                 # Should return error code
@@ -415,6 +461,7 @@ class TestGracefulShutdown:
                         mock_monitor_class.return_value = mock_monitor
 
                         import main
+
                         result = main.main(env=TEST_ENV)
 
                         assert result == 0
@@ -444,10 +491,13 @@ class TestRecoveryExhaustedReturnsError:
                 with patch("main.authenticate_cmp"):
                     with patch("main.ContinuousMonitor") as mock_monitor_class:
                         mock_monitor = MagicMock()
-                        mock_monitor.monitor_once.side_effect = RecoveryExhaustedError("Max retries")
+                        mock_monitor.monitor_once.side_effect = RecoveryExhaustedError(
+                            "Max retries"
+                        )
                         mock_monitor_class.return_value = mock_monitor
 
                         import main
+
                         result = main.main(env=TEST_ENV)
 
                         assert result == 1
@@ -473,12 +523,15 @@ class TestAuthenticationErrorReturnsError:
                 mock_imap = MagicMock()
                 mock_imap_class.return_value = mock_imap
 
-                with patch("main.authenticate_cmp", side_effect=AuthenticationError("Auth failed")):
+                with patch(
+                    "main.authenticate_cmp",
+                    side_effect=AuthenticationError("Auth failed"),
+                ):
                     import main
+
                     result = main.main(env=TEST_ENV)
 
                     assert result == 1
-
 
 
 class TestStartupDashboardNavigationRecovery:
@@ -511,6 +564,7 @@ class TestStartupDashboardNavigationRecovery:
                         mock_monitor_class.return_value = mock_monitor
 
                         import main
+
                         result = main.main(env=TEST_ENV)
 
                         assert result == 0
@@ -520,7 +574,9 @@ class TestStartupDashboardNavigationRecovery:
 
     @patch("main.time.sleep")
     @patch("main.navigate_to_dashboard")
-    def test_startup_navigation_handles_authentication_required(self, mock_navigate, mock_sleep):
+    def test_startup_navigation_handles_authentication_required(
+        self, mock_navigate, mock_sleep
+    ):
         from dashboard_monitor import AuthenticationRequiredError
 
         mock_navigate.side_effect = [
@@ -550,6 +606,7 @@ class TestStartupDashboardNavigationRecovery:
                         mock_monitor_class.return_value = mock_monitor
 
                         import main
+
                         result = main.main(env=TEST_ENV)
 
                         assert result == 0
@@ -559,7 +616,9 @@ class TestStartupDashboardNavigationRecovery:
 
     @patch("main.time.sleep")
     @patch("main.navigate_to_dashboard")
-    def test_startup_navigation_exhausts_retries_returns_error(self, mock_navigate, mock_sleep):
+    def test_startup_navigation_exhausts_retries_returns_error(
+        self, mock_navigate, mock_sleep
+    ):
         from dashboard_monitor import RecoveryError
 
         mock_navigate.side_effect = RecoveryError("Persistent navigation error")
@@ -582,6 +641,7 @@ class TestStartupDashboardNavigationRecovery:
                 with patch("main.authenticate_cmp"):
                     with patch("main.ContinuousMonitor") as mock_monitor_class:
                         import main
+
                         result = main.main(env=TEST_ENV)
 
                         assert result == 1
@@ -614,6 +674,7 @@ class TestStartupDashboardNavigationRecovery:
                 with patch("main.authenticate_cmp"):
                     with patch("main.ContinuousMonitor") as mock_monitor_class:
                         import main
+
                         result = main.main(env=TEST_ENV)
 
                         assert result == 1
@@ -636,7 +697,9 @@ class TestLoggingSetup:
         file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
         assert len(file_handlers) >= 1
 
-        created_files = list(tmp_path.glob("logs/monitor_*.log")) or list(tmp_path.glob("monitor_*.log"))
+        created_files = list(tmp_path.glob("logs/monitor_*.log")) or list(
+            tmp_path.glob("monitor_*.log")
+        )
         assert len(created_files) == 1
         assert re.match(r"^monitor_\d{8}_\d{6}\.log$", created_files[0].name)
 
@@ -673,7 +736,10 @@ class TestLoggingSetup:
         logging.getLogger("test").info("timestamp check")
 
         output = explicit_path.read_text(encoding="utf-8")
-        assert re.search(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] INFO:test: timestamp check$", output.strip())
+        assert re.search(
+            r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] INFO:test: timestamp check$",
+            output.strip(),
+        )
 
         root = logging.getLogger()
         for h in list(root.handlers):
@@ -681,7 +747,9 @@ class TestLoggingSetup:
                 root.removeHandler(h)
                 h.close()
 
-    def test_main_handled_failure_writes_single_start_and_end_without_exception_text(self, tmp_path):
+    def test_main_handled_failure_writes_single_start_and_end_without_exception_text(
+        self, tmp_path
+    ):
         import logging
 
         import main
@@ -712,8 +780,18 @@ class TestLoggingSetup:
                         assert main.main(env=TEST_ENV) == 1
 
         output = log_path.read_text(encoding="utf-8")
-        assert output.count("==================== START CMP Dashboard Monitor ====================") == 1
-        assert output.count("==================== END CMP Dashboard Monitor ====================") == 1
+        assert (
+            output.count(
+                "==================== START CMP Dashboard Monitor ===================="
+            )
+            == 1
+        )
+        assert (
+            output.count(
+                "==================== END CMP Dashboard Monitor ===================="
+            )
+            == 1
+        )
         assert "sensitive_token_abc123" not in output
 
         root = logging.getLogger()
@@ -753,8 +831,18 @@ class TestLoggingSetup:
                                 assert main.main(env=TEST_ENV) == 0
 
         output = log_path.read_text(encoding="utf-8")
-        assert output.count("==================== START CMP Dashboard Monitor ====================") == 1
-        assert output.count("==================== END CMP Dashboard Monitor ====================") == 1
+        assert (
+            output.count(
+                "==================== START CMP Dashboard Monitor ===================="
+            )
+            == 1
+        )
+        assert (
+            output.count(
+                "==================== END CMP Dashboard Monitor ===================="
+            )
+            == 1
+        )
 
         root = logging.getLogger()
         for handler in list(root.handlers):
@@ -762,7 +850,9 @@ class TestLoggingSetup:
                 root.removeHandler(handler)
                 handler.close()
 
-    def test_repeated_setup_without_duplicate_owned_handlers_or_closing_unrelated(self, tmp_path):
+    def test_repeated_setup_without_duplicate_owned_handlers_or_closing_unrelated(
+        self, tmp_path
+    ):
         import logging
 
         from main import setup_logging
@@ -784,11 +874,15 @@ class TestLoggingSetup:
             log2 = tmp_path / "run2.log"
 
             setup_logging("INFO", log_file=log1)
-            owned_after_first = [h for h in root.handlers if getattr(h, "_cmp_owned", False)]
+            owned_after_first = [
+                h for h in root.handlers if getattr(h, "_cmp_owned", False)
+            ]
             assert len(owned_after_first) == 2
 
             setup_logging("DEBUG", log_file=log2)
-            owned_after_second = [h for h in root.handlers if getattr(h, "_cmp_owned", False)]
+            owned_after_second = [
+                h for h in root.handlers if getattr(h, "_cmp_owned", False)
+            ]
             assert len(owned_after_second) == 2
 
             assert unrelated_handler in root.handlers
@@ -825,7 +919,9 @@ class TestExceptionTracebackAndCleanupLogging:
                 with patch("main.authenticate_cmp"):
                     with patch("main.ContinuousMonitor") as mock_monitor_class:
                         mock_monitor = MagicMock()
-                        mock_monitor.monitor_once.side_effect = RecoveryExhaustedError("sensitive_token_abc123")
+                        mock_monitor.monitor_once.side_effect = RecoveryExhaustedError(
+                            "sensitive_token_abc123"
+                        )
                         mock_monitor_class.return_value = mock_monitor
 
                         with patch("main.log") as mock_log:
@@ -871,8 +967,14 @@ class TestExceptionTracebackAndCleanupLogging:
 
                             assert result == 0
                             mock_log.warning.assert_called()
-                            warning_call_args = [call[0][0] for call in mock_log.warning.call_args_list]
-                            assert any("Cleanup failure" in msg or "Failed to close page" in msg for msg in warning_call_args)
+                            warning_call_args = [
+                                call[0][0] for call in mock_log.warning.call_args_list
+                            ]
+                            assert any(
+                                "Cleanup failure" in msg
+                                or "Failed to close page" in msg
+                                for msg in warning_call_args
+                            )
 
     @patch("main.navigate_to_dashboard")
     def test_unexpected_exception_logs_message_and_traceback(self, mock_navigate):
@@ -908,7 +1010,6 @@ class TestExceptionTracebackAndCleanupLogging:
                         )
 
 
-
 class TestMainVpnLifecycle:
     @patch("main.navigate_to_dashboard")
     def test_main_vpn_lifecycle_ordering(self, mock_navigate):
@@ -916,8 +1017,12 @@ class TestMainVpnLifecycle:
 
         events = []
         vpn_mock = MagicMock(spec=ConnectivityController)
-        vpn_mock.prepare_reauthentication.side_effect = lambda: events.append("vpn_prepare_reauthentication")
-        vpn_mock.finish_authentication.side_effect = lambda: events.append("vpn_finish_authentication")
+        vpn_mock.prepare_reauthentication.side_effect = lambda: events.append(
+            "vpn_prepare_reauthentication"
+        )
+        vpn_mock.finish_authentication.side_effect = lambda: events.append(
+            "vpn_finish_authentication"
+        )
 
         with patch("main.sync_playwright") as mock_sync:
             mock_playwright = MagicMock()
@@ -933,21 +1038,29 @@ class TestMainVpnLifecycle:
                 mock_imap = MagicMock()
                 mock_imap_class.return_value = mock_imap
                 with patch("main.authenticate_cmp") as mock_auth:
+
                     def _fake_auth(*args, **kwargs):
                         events.append("authenticate_cmp")
                         hook = kwargs.get("on_otp_submitted")
                         if hook:
                             hook()
                         return True
+
                     mock_auth.side_effect = _fake_auth
-                    mock_navigate.side_effect = lambda *args, **kwargs: events.append("navigate_to_dashboard") or True
+                    mock_navigate.side_effect = (
+                        lambda *args, **kwargs: events.append("navigate_to_dashboard")
+                        or True
+                    )
                     with patch("main.ContinuousMonitor") as mock_monitor_class:
                         mock_monitor = MagicMock()
                         mock_monitor.monitor_once.side_effect = KeyboardInterrupt()
                         mock_monitor_class.return_value = mock_monitor
 
                         import main
-                        result = main.main(env=TEST_ENV, connectivity_factory=lambda *args: vpn_mock)
+
+                        result = main.main(
+                            env=TEST_ENV, connectivity_factory=lambda *args: vpn_mock
+                        )
 
                         assert result == 0
                         assert events == [
@@ -957,13 +1070,44 @@ class TestMainVpnLifecycle:
                         ]
                         mock_monitor_class.assert_called_once()
 
-    def test_main_vpn_does_not_connect_on_auth_failure(self):
-        from cmp_auth import AuthenticationError
-        from vpn import ConnectivityController
+    def test_preflight_failure_aborts_before_imap_and_auth(self):
+        from vpn import WarpValidationError
 
-        vpn_mock = MagicMock(spec=ConnectivityController)
+        env = dict(TEST_ENV)
+        env["WARP_MODE"] = "proxy"
+        env["WARP_CLI_PATH"] = "warp-cli"
 
-        with patch("main.sync_playwright") as mock_sync:
+        with patch("main.ImapClient") as mock_imap_class, patch(
+            "main.WarpClient"
+        ) as mock_warp_class:
+            mock_imap = MagicMock()
+            mock_imap_class.return_value = mock_imap
+            mock_warp = MagicMock()
+            mock_warp.preflight_check.side_effect = [
+                WarpValidationError("First preflight fail"),
+                WarpValidationError("Second preflight fail"),
+            ]
+            mock_warp_class.return_value = mock_warp
+
+            import main
+
+            res = main.main(env=env, warp_factory=lambda *args: mock_warp)
+            assert res == 1
+            mock_imap.connect.assert_not_called()
+            assert mock_warp.restart_fresh.call_count == 1
+
+    def test_preflight_pass_through_after_restart(self):
+        from vpn import WarpValidationError, PreflightResult
+
+        env = dict(TEST_ENV)
+        env["WARP_MODE"] = "proxy"
+        env["WARP_CLI_PATH"] = "warp-cli"
+
+        with patch("main.sync_playwright") as mock_sync, patch(
+            "main.authenticate_cmp"
+        ), patch("main.navigate_to_dashboard"), patch(
+            "main.ContinuousMonitor"
+        ) as mock_mon_class:
             mock_playwright = MagicMock()
             mock_browser = MagicMock()
             mock_context = MagicMock()
@@ -973,15 +1117,25 @@ class TestMainVpnLifecycle:
             mock_browser.new_context.return_value = mock_context
             mock_context.new_page.return_value = mock_page
 
-            with patch("main.ImapClient") as mock_imap_class:
+            mock_mon = MagicMock()
+            mock_mon.monitor_once.side_effect = KeyboardInterrupt()
+            mock_mon_class.return_value = mock_mon
+
+            with patch("main.ImapClient") as mock_imap_class, patch(
+                "main.WarpClient"
+            ) as mock_warp_class:
                 mock_imap = MagicMock()
                 mock_imap_class.return_value = mock_imap
-                with patch("main.authenticate_cmp", side_effect=AuthenticationError("Auth failed")):
-                    with patch("main.ContinuousMonitor") as mock_monitor_class:
-                        import main
-                        result = main.main(env=TEST_ENV, connectivity_factory=lambda *args: vpn_mock)
+                mock_warp = MagicMock()
+                mock_warp.preflight_check.side_effect = [
+                    WarpValidationError("First fail"),
+                    PreflightResult("on", "203.0.113.0", "CGK", True, True, 200),
+                ]
+                mock_warp_class.return_value = mock_warp
 
-                        assert result == 1
-                        vpn_mock.prepare_reauthentication.assert_not_called()
-                        vpn_mock.finish_authentication.assert_not_called()
-                        mock_monitor_class.assert_not_called()
+                import main
+
+                res = main.main(env=env, warp_factory=lambda *args: mock_warp)
+                assert res == 0
+                mock_warp.restart_fresh.assert_called_once()
+                mock_imap.connect.assert_called_once()
