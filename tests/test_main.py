@@ -1091,10 +1091,17 @@ class TestMainVpnLifecycle:
 
             import main
 
-            res = main.main(env=env, warp_factory=lambda *args: mock_warp)
+            mock_probe = MagicMock()
+            mock_probe.is_reachable.return_value = True
+            res = main.main(
+                env=env,
+                warp_factory=lambda *args: mock_warp,
+                probe_factory=lambda *a: mock_probe,
+                checkpoint_factory=lambda *a: MagicMock(),
+            )
             assert res == 1
             mock_imap.connect.assert_not_called()
-            assert mock_warp.restart_fresh.call_count == 1
+            assert mock_warp.restart_fresh.call_count == 2
 
     def test_preflight_pass_through_after_restart(self):
         from vpn import WarpValidationError, PreflightResult
@@ -1135,7 +1142,14 @@ class TestMainVpnLifecycle:
 
                 import main
 
-                res = main.main(env=env, warp_factory=lambda *args: mock_warp)
+                mock_probe = MagicMock()
+                mock_probe.is_reachable.return_value = True
+                res = main.main(
+                    env=env,
+                    warp_factory=lambda *args: mock_warp,
+                    probe_factory=lambda *a: mock_probe,
+                    checkpoint_factory=lambda *a: MagicMock(),
+                )
                 assert res == 0
-                mock_warp.restart_fresh.assert_called_once()
+                assert mock_warp.restart_fresh.call_count == 3
                 mock_imap.connect.assert_called_once()

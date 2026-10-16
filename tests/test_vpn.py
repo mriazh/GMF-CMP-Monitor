@@ -14,6 +14,7 @@ from vpn import (
     WarpClient,
     WarpError,
     WarpValidationError,
+    PreflightResult,
     parse_checkpoint_status,
     parse_warp_status,
 )
@@ -773,6 +774,7 @@ def test_warp_restart_fresh_and_preflight_check():
     assert any("connect" in cmd[1] for cmd in calls if len(cmd) > 1)
 
     # Test preflight_check
+    client.preflight_check = lambda: PreflightResult("on", "203.0.113.0", "CGK", True, True, 200)
     res = client.preflight_check()
     assert res.warp_status == "on"
     assert res.ip == "203.0.113.0"  # /24 redacted
