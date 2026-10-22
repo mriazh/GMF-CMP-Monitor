@@ -583,19 +583,35 @@ class WarpClient:
         except Exception:
             dns_resolved = False
 
-        # 3. TCP 443 CAS
+        # 3. TCP 443 CAS via SOCKS5 CONNECT
         tcp_connected = False
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
-            # connect directly or via SOCKS5? The prompt specifies: "DNS CAS host via proxy, TCP 443 CAS 10s, GET CAS login accept 2xx/3xx/4xx"
-            # Let's connect via SOCKS5 for TCP/HTTP or direct socket if proxy socket.
-            # Actually, connecting through the SOCKS5 proxy or direct:
-            sock.connect((cas_host, 443))
-            tcp_connected = True
-        except Exception:
-            tcp_connected = False
+            sock.connect(("127.0.0.1", port))
+            sock.sendall(b"\x05\x01\x00")
+            resp = sock.recv(2)
+            if resp != b"\x05\x00":
+                raise WarpValidationError(f"SOCKS5 handshake failed for CAS TCP probe: {resp!r}")
+
+            domain = cas_host.encode("utf-8")
+            connect_req = (
+                b"\x05\x01\x00\x03"
+                + bytes([len(domain)])
+                + domain
+                + (443).to_bytes(2, "big")
+            )
+            sock.sendall(connect_req)
+            connect_resp = sock.recv(10)
+            if len(connect_resp) >= 2 and connect_resp[1] == 0:
+                tcp_connected = True
+            else:
+                raise WarpValidationError("SOCKS5 CONNECT to CAS failed")
+        except WarpValidationError:
+            raise
+        except Exception as exc:
+            raise WarpValidationError("CAS TCP probe via SOCKS5 failed") from exc
         finally:
             if sock:
                 try:
@@ -603,80 +619,72 @@ class WarpClient:
                 except Exception:
                     pass
 
-        # 4. GET CAS login accept 2xx/3xx/4xx
+        # 4. GET CAS login accept 2xx/3xx/4xx via SOCKS5 + TLS
         cas_status_code = 0
+        sock = None
         try:
-            # We can use urllib with a SOCKS proxy handler or our SOCKS5 socket helper or standard urlopen if proxy is configured.
-            # Or make a request through socks proxy or urllib request with proxy handler.
-            # Since _validate_socks5_proxy already does raw socket HTTP GET to www.cloudflare.com/cdn-cgi/trace, we can do a similar raw socket or urllib request for CAS login URL.
             parsed_cas = urlparse(self.settings.cas_url)
             cas_path = parsed_cas.path or "/"
             if parsed_cas.query:
                 cas_path += f"?{parsed_cas.query}"
 
-            # Use socks proxy socket to GET CAS login
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
             sock.connect(("127.0.0.1", port))
             sock.sendall(b"\x05\x01\x00")
             resp = sock.recv(2)
-            if resp == b"\x05\x00":
-                domain = cas_host.encode("utf-8")
-                connect_req = (
-                    b"\x05\x01\x00\x03"
-                    + bytes([len(domain)])
-                    + domain
-                    + (443).to_bytes(2, "big")
-                )
-                sock.sendall(connect_req)
-                connect_resp = sock.recv(10)
-                if len(connect_resp) >= 2 and connect_resp[1] == 0:
-                    # Send TLS handshake or HTTPS request. Since python ssl wrapper can wrap socket:
-                    import ssl
+            if resp != b"\x05\x00":
+                raise WarpValidationError(f"SOCKS5 handshake failed for CAS HTTPS probe: {resp!r}")
 
-                    context = ssl.create_default_context()
-                    context.check_hostname = False
-                    context.verify_mode = ssl.CERT_NONE
-                    ssock = context.wrap_socket(sock, server_hostname=cas_host)
-                    try:
-                        ssock.sendall(
-                            f"GET {cas_path} HTTP/1.1\r\n"
-                            f"Host: {cas_host}\r\n"
-                            f"User-Agent: GMF-CMP-Monitor/1.0\r\n"
-                            f"Connection: close\r\n\r\n".encode("utf-8")
-                        )
-                        raw_resp = b""
-                        while True:
-                            chunk = ssock.recv(1024)
-                            if not chunk:
-                                break
-                            raw_resp += chunk
-                        header_part = raw_resp.split(b"\r\n\r\n", 1)[0].decode(
-                            "utf-8", errors="replace"
-                        )
-                        first_line = (
-                            header_part.splitlines()[0]
-                            if header_part.splitlines()
-                            else ""
-                        )
-                        parts = first_line.split()
-                        if len(parts) >= 2:
-                            cas_status_code = int(parts[1])
-                    finally:
-                        ssock.close()
-        except Exception:
-            # Fallback to standard urlopen if proxy socket method encounters environment quirks in tests
+            domain = cas_host.encode("utf-8")
+            connect_req = (
+                b"\x05\x01\x00\x03"
+                + bytes([len(domain)])
+                + domain
+                + (443).to_bytes(2, "big")
+            )
+            sock.sendall(connect_req)
+            connect_resp = sock.recv(10)
+            if len(connect_resp) < 2 or connect_resp[1] != 0:
+                raise WarpValidationError("SOCKS5 CONNECT to CAS failed for HTTPS probe")
+
+            import ssl
+
+            context = ssl.create_default_context()
+            if not self.settings.preflight_verify_tls:
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+            ssock = context.wrap_socket(sock, server_hostname=cas_host)
             try:
-                req = Request(
-                    self.settings.cas_url,
-                    method="GET",
-                    headers={"User-Agent": "GMF-CMP-Monitor/1.0"},
+                ssock.sendall(
+                    f"GET {cas_path} HTTP/1.1\r\n"
+                    f"Host: {cas_host}\r\n"
+                    f"User-Agent: GMF-CMP-Monitor/1.0\r\n"
+                    f"Connection: close\r\n\r\n".encode("utf-8")
                 )
-                with urlopen(req, timeout=timeout) as resp_obj:
-                    cas_status_code = getattr(resp_obj, "status", 200)
-            except Exception as exc:
-                if hasattr(exc, "code"):
-                    cas_status_code = exc.code
+                raw_resp = b""
+                while True:
+                    chunk = ssock.recv(1024)
+                    if not chunk:
+                        break
+                    raw_resp += chunk
+                header_part = raw_resp.split(b"\r\n\r\n", 1)[0].decode(
+                    "utf-8", errors="replace"
+                )
+                first_line = (
+                    header_part.splitlines()[0]
+                    if header_part.splitlines()
+                    else ""
+                )
+                parts = first_line.split()
+                if len(parts) >= 2:
+                    cas_status_code = int(parts[1])
+            finally:
+                ssock.close()
+        except WarpValidationError:
+            raise
+        except Exception as exc:
+            raise WarpValidationError("CAS HTTPS probe via SOCKS5 failed") from exc
 
         if cas_status_code not in range(200, 500):
             raise WarpValidationError(

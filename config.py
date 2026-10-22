@@ -109,6 +109,7 @@ class Settings:
     viewport_auto: bool = False
     page_zoom_percent: int = 67
     low_memory_mode: bool = True
+    preflight_verify_tls: bool = True
 
 
 def _strip_quotes(value: str) -> str:
@@ -402,6 +403,7 @@ def load_settings(
         preflight_timeout_seconds=_positive_float(
             values, "PREFLIGHT_TIMEOUT_SECONDS", 10.0
         ),
+        preflight_verify_tls=_boolean(values, "PREFLIGHT_VERIFY_TLS", True),
         office_network_probe_host=probe_host,
         office_network_probe_port=_positive_int(
             values, "OFFICE_NETWORK_PROBE_PORT", 993

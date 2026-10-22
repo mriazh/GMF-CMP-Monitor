@@ -89,7 +89,9 @@ def test_build_script_contract() -> None:
     assert "GMF-CMP-Monitor.exe" in content
     assert "%LOCALAPPDATA%" in content or "$env:LOCALAPPDATA" in content
     assert "ms-playwright" in content
-    assert "firefox-*" in content
+    assert "browsers.json" in content
+    assert "firefox-" in content
+    assert "winldd-" in content
     assert "Copy-Item" in content
     assert "browsers" in content
     assert "firefox.exe" in content

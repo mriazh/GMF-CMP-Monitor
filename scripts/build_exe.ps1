@@ -52,19 +52,34 @@ if (-not (Test-Path -LiteralPath $ExpectedExe)) {
 Write-Host "Build verified. Executable found at $ExpectedExe" -ForegroundColor Green
 
 $PlaywrightRoot = Join-Path $env:LOCALAPPDATA "ms-playwright"
-$FirefoxFolders = Get-ChildItem -LiteralPath $PlaywrightRoot -Force -Directory -Filter "firefox-*" -ErrorAction SilentlyContinue
-if (-not $FirefoxFolders -or $FirefoxFolders.Count -eq 0) {
-    Write-Host "Error: No Playwright Firefox browser found under $PlaywrightRoot. Run 'playwright install firefox' first." -ForegroundColor Red
+
+# Read required browser revisions from driver's browsers.json
+$BrowsersJsonPath = python -c "import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / 'driver' / 'package' / 'browsers.json')"
+if (-not (Test-Path -LiteralPath $BrowsersJsonPath)) {
+    Write-Host "Error: browsers.json not found at $BrowsersJsonPath" -ForegroundColor Red
     exit 1
 }
-$FirefoxFolder = $FirefoxFolders[0]
+$BrowsersJson = Get-Content -Raw -LiteralPath $BrowsersJsonPath | ConvertFrom-Json
+$FirefoxRev = ($BrowsersJson.browsers | Where-Object { $_.name -eq 'firefox' }).revision
+$WinlddRev = ($BrowsersJson.browsers | Where-Object { $_.name -eq 'winldd' }).revision
+if (-not $FirefoxRev -or -not $WinlddRev) {
+    Write-Host "Error: Could not determine required Firefox or winldd revision from browsers.json" -ForegroundColor Red
+    exit 1
+}
+
+$FirefoxFolderName = "firefox-$FirefoxRev"
+$FirefoxFolder = Join-Path $PlaywrightRoot $FirefoxFolderName
+if (-not (Test-Path -LiteralPath $FirefoxFolder)) {
+    Write-Host "Error: Required Firefox revision folder not found: $FirefoxFolder" -ForegroundColor Red
+    exit 1
+}
 $TargetBrowserDir = Join-Path $ExpectedExeDir "browsers"
 if (-not (Test-Path -LiteralPath $TargetBrowserDir)) {
     New-Item -ItemType Directory -Path $TargetBrowserDir | Out-Null
 }
-$Destination = Join-Path $TargetBrowserDir $FirefoxFolder.Name
-Copy-Item -LiteralPath $FirefoxFolder.FullName -Destination $Destination -Recurse -Force
-Write-Host "Bundled Firefox browser from $($FirefoxFolder.FullName) into $Destination" -ForegroundColor Green
+$Destination = Join-Path $TargetBrowserDir $FirefoxFolderName
+Copy-Item -LiteralPath $FirefoxFolder -Destination $Destination -Recurse -Force
+Write-Host "Bundled Firefox browser from $FirefoxFolder into $Destination" -ForegroundColor Green
 
 $FirefoxExe = Join-Path $Destination "firefox\firefox.exe"
 if (-not (Test-Path -LiteralPath $FirefoxExe)) {
@@ -76,14 +91,16 @@ if (-not (Test-Path -LiteralPath $FirefoxExe)) {
 }
 Write-Host "Bundled Firefox verified at $FirefoxExe" -ForegroundColor Green
 
-$WinlddFolders = Get-ChildItem -LiteralPath $PlaywrightRoot -Force -Directory -Filter "winldd-*" -ErrorAction SilentlyContinue
-if ($WinlddFolders -and $WinlddFolders.Count -gt 0) {
-    $WinlddFolder = $WinlddFolders[0]
-    $WinlddDest = Join-Path $TargetBrowserDir $WinlddFolder.Name
-    Copy-Item -LiteralPath $WinlddFolder.FullName -Destination $WinlddDest -Recurse -Force
-    Write-Host "Bundled winldd helper from $($WinlddFolder.FullName) into $WinlddDest" -ForegroundColor Green
-    $PrintDeps = Join-Path $WinlddDest "PrintDeps.exe"
-    if (Test-Path -LiteralPath $PrintDeps) {
-        Write-Host "Bundled winldd PrintDeps.exe verified at $PrintDeps" -ForegroundColor Green
-    }
+$WinlddFolderName = "winldd-$WinlddRev"
+$WinlddFolder = Join-Path $PlaywrightRoot $WinlddFolderName
+if (-not (Test-Path -LiteralPath $WinlddFolder)) {
+    Write-Host "Error: Required winldd revision folder not found: $WinlddFolder" -ForegroundColor Red
+    exit 1
+}
+$WinlddDest = Join-Path $TargetBrowserDir $WinlddFolderName
+Copy-Item -LiteralPath $WinlddFolder -Destination $WinlddDest -Recurse -Force
+Write-Host "Bundled winldd helper from $WinlddFolder into $WinlddDest" -ForegroundColor Green
+$PrintDeps = Join-Path $WinlddDest "PrintDeps.exe"
+if (Test-Path -LiteralPath $PrintDeps) {
+    Write-Host "Bundled winldd PrintDeps.exe verified at $PrintDeps" -ForegroundColor Green
 }

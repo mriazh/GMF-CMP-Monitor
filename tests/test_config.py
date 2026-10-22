@@ -1173,3 +1173,66 @@ class TestLowMemoryModeValidation:
             ConfigError, match="PREFLIGHT_TIMEOUT_SECONDS must be a positive number"
         ):
             load_settings(env=env)
+
+
+class TestPreflightVerifyTls:
+    """Tests for PREFLIGHT_VERIFY_TLS configuration."""
+
+    def test_preflight_verify_tls_default_true(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+        }
+        settings = load_settings(env=env)
+        assert settings.preflight_verify_tls is True
+
+    def test_preflight_verify_tls_false_values_accepted(self):
+        for val in ["false", "0", "off", "no", "False", "OFF", "NO"]:
+            env = {
+                "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+                "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+                "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+                "CMP_USERNAME": "testuser",
+                "CMP_PASSWORD": "testpass",
+                "IMAP_USERNAME": "imapuser",
+                "IMAP_PASSWORD": "imappass",
+                "PREFLIGHT_VERIFY_TLS": val,
+            }
+            settings = load_settings(env=env)
+            assert settings.preflight_verify_tls is False
+
+    def test_preflight_verify_tls_true_values_accepted(self):
+        for val in ["true", "1", "on", "yes", "True", "ON", "YES"]:
+            env = {
+                "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+                "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+                "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+                "CMP_USERNAME": "testuser",
+                "CMP_PASSWORD": "testpass",
+                "IMAP_USERNAME": "imapuser",
+                "IMAP_PASSWORD": "imappass",
+                "PREFLIGHT_VERIFY_TLS": val,
+            }
+            settings = load_settings(env=env)
+            assert settings.preflight_verify_tls is True
+
+    def test_preflight_verify_tls_rejects_invalid(self):
+        env = {
+            "CMP_CAS_URL": "https://ep.iotcc.telkomsel.com/cas/login",
+            "CMP_PRODUCTS_URL": "https://ep.iotcc.telkomsel.com/#!products",
+            "CMP_DASHBOARD_URL": "https://ep.iotcc.telkomsel.com/#!dashboard",
+            "CMP_USERNAME": "testuser",
+            "CMP_PASSWORD": "testpass",
+            "IMAP_USERNAME": "imapuser",
+            "IMAP_PASSWORD": "imappass",
+            "PREFLIGHT_VERIFY_TLS": "maybe",
+        }
+        with pytest.raises(
+            ConfigError, match="PREFLIGHT_VERIFY_TLS must be a boolean value"
+        ):
+            load_settings(env=env)
