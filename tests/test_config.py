@@ -1,6 +1,7 @@
 """Tests for configuration validation."""
 
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -194,10 +195,8 @@ class TestEnvFileLoading:
         )
         settings = load_settings(env_file=env_file)
         assert settings.cmp_username.get_secret_value() == "testuser"
-        assert (
-            str(settings.checkpoint_trac_path)
-            == "C:\\Program Files (x86)\\CheckPoint\\trac.exe"
-        )
+        expected = str(Path("C:/Program Files (x86)/CheckPoint/trac.exe"))
+        assert str(settings.checkpoint_trac_path) == expected
 
     def test_environment_loading_does_not_discover_dotenv(self, tmp_path, monkeypatch):
         for key in (
@@ -489,7 +488,10 @@ class TestBrowserSettings:
         "path_value, error",
         [
             ("firefox.exe", "absolute path"),
-            ("C:/missing/firefox.exe", "existing regular file"),
+            (
+                str(Path("/missing_dir_for_test/firefox.exe").resolve()),
+                "existing regular file",
+            ),
         ],
     )
     def test_firefox_executable_path_rejects_invalid_path(self, path_value, error):
