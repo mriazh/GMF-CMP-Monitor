@@ -32,11 +32,10 @@ EXPECTED_LOW_MEMORY_PREFS = {
     "browser.cache.disk.smart_size.enabled": False,
     "browser.cache.memory.capacity": 32768,
     "browser.sessionhistory.max_entries": 2,
-    "dom.ipc.processCount": 1,
     "media.peerconnection.enabled": False,
     "toolkit.telemetry.enabled": False,
-    "accessibility.force_disabled": 1,
     "browser.pagethumbnails.capturing_disabled": True,
+    "network.proxy.socks_remote_dns": True,
 }
 
 
@@ -149,6 +148,7 @@ class TestFirefoxOnly:
                         # Verify Chromium/Chrome/WebKit were NOT called
                         assert not mock_playwright.chromium.launch.called
                         assert not mock_playwright.webkit.launch.called
+                        assert mock_page.on.call_count == 2
 
     @patch("main.navigate_to_dashboard")
     def test_firefox_launched_with_socks5_proxy_in_proxy_mode(self, mock_navigate):

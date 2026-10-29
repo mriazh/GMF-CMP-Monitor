@@ -261,14 +261,13 @@ def main(
                 "browser.cache.disk.smart_size.enabled": False,
                 "browser.cache.memory.capacity": 32768,
                 "browser.sessionhistory.max_entries": 2,
-                "dom.ipc.processCount": 1,
                 "media.peerconnection.enabled": False,
                 "toolkit.telemetry.enabled": False,
-                "accessibility.force_disabled": 1,
                 "browser.pagethumbnails.capturing_disabled": True,
+                "network.proxy.socks_remote_dns": True,
             }
             log.info(
-                "Low-memory Firefox profile active: disk cache disabled, RAM cache bounded to 32MB, single-process"
+                "Low-memory Firefox profile active: disk cache disabled, RAM cache bounded to 32MB"
             )
 
         browser = playwright.firefox.launch(**launch_kwargs)
@@ -330,6 +329,16 @@ def main(
             )
 
         page = context.new_page()
+        page.on(
+            "console",
+            lambda msg: log.warning("Browser console [%s]: %s", msg.type, msg.text)
+            if msg.type in ("warning", "error")
+            else None,
+        )
+        page.on(
+            "pageerror",
+            lambda err: log.error("Browser page error: %s", err),
+        )
 
         log.info("Connecting to IMAP...")
         imap_client.connect()

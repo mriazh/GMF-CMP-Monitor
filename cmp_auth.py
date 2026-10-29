@@ -170,7 +170,10 @@ def _do_authenticate(
 
         current_step = "submitting OTP form"
         page.fill("#token", otp_value)
-        page.click("#login input[name='_eventId_submit'][type='submit']", timeout=settings.navigation_timeout_ms)
+        try:
+            page.click("#login input[name='_eventId_submit'][type='submit']", timeout=settings.navigation_timeout_ms, no_wait_after=True)
+        except TypeError:
+            page.click("#login input[name='_eventId_submit'][type='submit']", timeout=settings.navigation_timeout_ms)
         log.info("OTP submitted")
 
         if on_otp_submitted is not None:
