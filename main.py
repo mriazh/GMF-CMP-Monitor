@@ -272,29 +272,30 @@ def main(
 
         browser = playwright.firefox.launch(**launch_kwargs)
 
+        context_kwargs = {'ignore_https_errors': True}
         if settings.viewport_auto:
-            context = browser.new_context(no_viewport=True)
+            context_kwargs['no_viewport'] = True
             log.info(
                 "Firefox launched with auto-responsive viewport (adapts to display)"
             )
         else:
-            context = browser.new_context(
-                viewport={
-                    "width": settings.viewport_width,
-                    "height": settings.viewport_height,
-                }
-            )
+            context_kwargs['viewport'] = {
+                "width": settings.viewport_width,
+                "height": settings.viewport_height,
+            }
             log.info(
                 "Firefox launched (viewport=%dx%d)",
                 settings.viewport_width,
                 settings.viewport_height,
             )
+        context = browser.new_context(**context_kwargs)
 
         if settings.page_zoom_percent != 100:
             zoom_pct = settings.page_zoom_percent
             context.add_init_script(f"""
                 (() => {{
                     const applyRouteAwareZoom = () => {{
+                        if (!window.location.protocol.startsWith('http')) return;
                         let style = document.getElementById('cmp-custom-zoom');
                         const isDashboard = window.location.hash.includes('!dashboard');
                         const targetZoom = isDashboard ? '{zoom_pct}%' : '100%';
