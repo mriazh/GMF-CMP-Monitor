@@ -140,10 +140,11 @@ class TestFirefoxOnly:
                             headless=False,
                             firefox_user_prefs=EXPECTED_LOW_MEMORY_PREFS,
                         )
-                        # Verify browser context was created with 1920x1080 viewport
+                        # Verify browser context was created with 1920x1080 viewport and ignore_https_errors=True
 
                         mock_browser.new_context.assert_called_once_with(
-                            viewport={"width": 1920, "height": 1080}
+                            viewport={"width": 1920, "height": 1080},
+                            ignore_https_errors=True,
                         )
                         # Verify Chromium/Chrome/WebKit were NOT called
                         assert not mock_playwright.chromium.launch.called

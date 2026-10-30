@@ -360,6 +360,25 @@ def _is_playwright_page(page: object) -> bool:
     return hasattr(page, "context") and hasattr(page, "goto")
 
 
+def _try_bypass_neterror_warning(p: object) -> bool:
+    try:
+        title = getattr(p, 'title', lambda: '')() or ''
+        url = getattr(p, 'url', '') or ''
+        if 'Security Risk' in title or 'neterror' in url:
+            log.warning('Detected Firefox Security Risk warning page; attempting auto-bypass')
+            adv = p.locator('#advancedButton').first
+            if hasattr(adv, 'is_visible') and adv.is_visible():
+                adv.click()
+            accept = p.locator('#exceptionDialogButton').first
+            if hasattr(accept, 'is_visible') and accept.is_visible():
+                accept.click()
+                log.info('Auto-accepted security risk exception')
+                return True
+    except Exception as exc:
+        log.debug('Auto-bypass attempt exception: %s', exc)
+    return False
+
+
 def _wait_for_products_page(
     page: object, settings: Settings, clock: Clock, post_otp: bool = False
 ) -> None:
@@ -385,6 +404,9 @@ def _wait_for_products_page(
     # First, wait for either root portal or products page (both indicate successful login)
     while clock.now() < deadline:
         try:
+            if clock.now() - start_time > 3.0:
+                _try_bypass_neterror_warning(page)
+
             url = getattr(page, "url", "") or ""
             if clock.now() - last_log_time >= 5.0:
                 last_log_time = clock.now()
