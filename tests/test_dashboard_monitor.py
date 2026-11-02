@@ -896,6 +896,7 @@ class TestDashboardMenuNavigationTiming:
         settings = make_test_settings()
         page = ErrorNotificationPage()
         page.set_menu_visible(True)
+        page._has_js_error = True
         monitor = ContinuousMonitor(
             settings=settings,
             page=page,
@@ -907,7 +908,7 @@ class TestDashboardMenuNavigationTiming:
             monitor._monitor_dashboard_state()
         except Exception:
             pass
-        assert page.reload_called
+        assert settings.cmp_products_url in [u for u, _, _ in page.goto_calls]
 
 
 class TestProductsRedirectBackToDashboard:

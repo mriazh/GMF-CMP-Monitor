@@ -180,10 +180,28 @@ def _do_authenticate(
 
         current_step = "submitting OTP form"
         page.fill("#token", otp_value)
-        try:
-            page.click("#login input[name='_eventId_submit'][type='submit']", timeout=settings.navigation_timeout_ms, no_wait_after=True)
-        except TypeError:
-            page.click("#login input[name='_eventId_submit'][type='submit']", timeout=settings.navigation_timeout_ms)
+        otp_submitted = False
+        for otp_sel in (
+            "#login input[name='_eventId_submit'][type='submit']",
+            "#login input[name='_eventId_submit']",
+            "input[name='_eventId_submit']",
+            "input[type='submit']",
+            "button[type='submit']",
+        ):
+            try:
+                page.click(otp_sel, timeout=5000, no_wait_after=True)
+                otp_submitted = True
+                break
+            except Exception:
+                continue
+
+        if not otp_submitted:
+            log.info("Direct OTP button click failed; falling back to Enter key on #token")
+            try:
+                page.press("#token", "Enter")
+                otp_submitted = True
+            except Exception as enter_exc:
+                raise AuthenticationError("Could not submit OTP form") from enter_exc
         log.info("OTP submitted")
 
         if on_otp_submitted is not None:
@@ -442,14 +460,30 @@ def _wait_for_products_page(
                 try:
                     title = page.title() if hasattr(page, "title") else ""
                     title_lower = title.lower()
-                    error_keywords = ('server not found', 'problem loading page', 'potential security risk', 'badcert')
+                    error_keywords = (
+                        "server not found",
+                        "problem loading page",
+                        "security risk",
+                        "not authorized",
+                        "application not authorized",
+                        "potential security risk",
+                        "badcert",
+                    )
                     if any(kw in title_lower for kw in error_keywords):
-                        log.info('Page in error/warning state (%s); reloading to recover', title.strip())
+                        log.info("Page in error/warning state ('%s'); navigating directly to products URL to recover", title.strip())
                         clock.sleep(1.0)
                         try:
-                            page.reload(timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
-                        except Exception:
-                            page.goto(settings.cmp_products_url, timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
+                            page.goto(
+                                settings.cmp_products_url,
+                                timeout=settings.navigation_timeout_ms,
+                                wait_until="domcontentloaded",
+                            )
+                        except Exception as nav_err:
+                            log.debug("Direct goto products error: %s; attempting reload", nav_err)
+                            try:
+                                page.reload(timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
+                            except Exception:
+                                pass
                         continue
                     if "log in successful" in title.lower() or "login successful" in title.lower():
                         log.info("CAS reported '%s'; navigating to products page", title.strip())

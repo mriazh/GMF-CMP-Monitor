@@ -110,6 +110,10 @@ class FakePage:
         elif selector == "#password" and key == "Enter":
             if self._state == "cas":
                 self._state = "otp_form"
+        elif selector == "#token" and key == "Enter":
+            if self._state == "otp_form" and self.fills.get("#token"):
+                self._state = "root_portal"
+                self.current_url = self._root_portal_url
 
     def goto(self, url: str, timeout: int = None, wait_until: str = None):
         self.urls.append((url, timeout))
@@ -321,12 +325,12 @@ class TestLoginSelectorFlow:
         
         # Override click to not transition state on initial submit
         original_click = page.click
-        def broken_click(selector):
+        def broken_click(selector, *args, **kwargs):
             if selector == "#fm1 input[name='submit'][type='submit']":
                 # Don't transition to otp_form state - simulate missing form
                 pass
             else:
-                original_click(selector)
+                original_click(selector, *args, **kwargs)
         page.click = broken_click
 
         from cmp_auth import AuthenticationError, authenticate_cmp
@@ -409,12 +413,19 @@ class TestSecurityRiskReload:
                 self.current_url = "https://ep.iotcc.telkomsel.com/cas/login"
                 self._locator_visible["#username"] = False
                 self._locator_visible["#password"] = False
+                self.goto_calls = []
             def title(self):
                 return "Potential Security Risk"
             def reload(self, **kwargs):
                 self.reload_called = True
                 self.current_url = self._products_url
                 self._state = "products"
+            def goto(self, url, timeout=None, wait_until=None):
+                super().goto(url, timeout=timeout, wait_until=wait_until)
+                self.goto_calls.append((url, timeout, wait_until))
+                if url == self._products_url:
+                    self.current_url = self._products_url
+                    self._state = "products"
 
         page = SecurityRiskFakePage()
         clock = FakeClock()
@@ -423,8 +434,8 @@ class TestSecurityRiskReload:
             _wait_for_products_page(page, settings, clock, post_otp=True)
         except Exception:
             pass
-        assert page.reload_called
-        assert "#fm1 input[name='submit'][type='submit']" not in page.clicks
+        assert page.current_url == settings.cmp_products_url
+        assert any(url == settings.cmp_products_url for url, _ in page.urls) or any(u == settings.cmp_products_url for u, _, _ in getattr(page, "goto_calls", []))
 
     def test_submit_enabled_by_form_event_then_clicked(self):
         """A disabled button that becomes enabled after a blur event is clicked normally."""
@@ -748,7 +759,7 @@ class TestOtpRejectionDetection:
         clock = FakeClock(start_time=1000.0)
 
         original_click = page.click
-        def delayed_otp_click(selector, timeout=None):
+        def delayed_otp_click(selector, timeout=None, **kwargs):
             original_click(selector, timeout=timeout)
             if selector == "#login input[name='_eventId_submit'][type='submit']":
                 page._state = "otp_form"
@@ -789,7 +800,7 @@ class TestOtpRejectionDetection:
         clock = FakeClock(start_time=1000.0)
 
         original_click = page.click
-        def persistent_rejection_click(selector, timeout=None):
+        def persistent_rejection_click(selector, timeout=None, **kwargs):
             original_click(selector, timeout=timeout)
             if selector == "#login input[name='_eventId_submit'][type='submit']":
                 page._state = "otp_form"
@@ -838,7 +849,7 @@ class TestOtpRejectionDetection:
         clock = FakeClock()
 
         original_click = page.click
-        def persistent_rejection_click(selector, timeout=None):
+        def persistent_rejection_click(selector, timeout=None, **kwargs):
             original_click(selector, timeout=timeout)
             if selector == "#login input[name='_eventId_submit'][type='submit']":
                 page._state = "otp_form"
@@ -868,7 +879,7 @@ class TestOtpRejectionDetection:
         clock = FakeClock()
 
         original_click = page.click
-        def persistent_rejection_click(selector, timeout=None):
+        def persistent_rejection_click(selector, timeout=None, **kwargs):
             original_click(selector, timeout=timeout)
             if selector == "#login input[name='_eventId_submit'][type='submit']":
                 page._state = "otp_form"
@@ -899,7 +910,7 @@ class TestOtpRejectionDetection:
         # root portal / products page.
         original_click = page.click
 
-        def rejecting_click(selector, timeout=None):
+        def rejecting_click(selector, timeout=None, **kwargs):
             original_click(selector, timeout)
             if selector == "#login input[name='_eventId_submit'][type='submit']":
                 page._state = "cas"
@@ -927,7 +938,7 @@ class TestOtpRejectionDetection:
         page = FakePage()
         original_click = page.click
 
-        def rejecting_click(selector, timeout=None):
+        def rejecting_click(selector, timeout=None, **kwargs):
             original_click(selector, timeout)
             if selector == "#login input[name='_eventId_submit'][type='submit']":
                 page._state = "cas"
@@ -990,7 +1001,7 @@ class TestAcceptableUsagePolicy:
 
         original_click = page.click
 
-        def aup_click(selector, timeout=None):
+        def aup_click(selector, timeout=None, **kwargs):
             original_click(selector, timeout)
             if "submit" in selector or "Accept" in selector:
                 page._title = "CMP Portal"

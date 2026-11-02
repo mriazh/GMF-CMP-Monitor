@@ -777,12 +777,20 @@ class ContinuousMonitor:
             self._clock.sleep(POLL_INTERVAL_SECONDS)
             if getattr(self._page, "_has_js_error", False) or _has_vaadin_error_notification(self._page):
                 setattr(self._page, "_has_js_error", False)
-                log.warning("JavaScript error or error overlay detected; reloading page to recover via products")
+                log.warning("JavaScript error or error overlay detected; navigating directly to products URL to recover")
                 try:
-                    self._page.reload(timeout=self._settings.navigation_timeout_ms, wait_until="domcontentloaded")
-                except Exception:
+                    self._page.goto(
+                        self._settings.cmp_products_url,
+                        timeout=self._settings.navigation_timeout_ms,
+                        wait_until="domcontentloaded",
+                    )
+                except Exception as goto_exc:
+                    log.warning("Direct goto products failed: %s; attempting reload", goto_exc)
                     try:
-                        self._page.goto(self._settings.cmp_products_url, timeout=self._settings.navigation_timeout_ms, wait_until="domcontentloaded")
+                        self._page.reload(
+                            timeout=self._settings.navigation_timeout_ms,
+                            wait_until="domcontentloaded",
+                        )
                     except Exception:
                         pass
                 return self._handle_products_state()
