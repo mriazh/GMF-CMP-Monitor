@@ -107,6 +107,9 @@ class FakePage:
             and self.fills.get("#password")
         ):
             self._submit_enabled = True
+        elif selector == "#password" and key == "Enter":
+            if self._state == "cas":
+                self._state = "otp_form"
 
     def goto(self, url: str, timeout: int = None, wait_until: str = None):
         self.urls.append((url, timeout))
@@ -362,21 +365,38 @@ class TestFreshTimestampOnEveryReLogin:
 
 
 class TestDisabledInitialSubmit:
-    def test_disabled_submit_button_raises_bounded_error(self):
-        """A visible but disabled initial submit button must fail with AuthenticationError."""
+    def test_disabled_submit_button_falls_back_to_password_enter(self):
+        """When initial submit button wait/click fails, fallback presses Enter on password to submit."""
         settings = make_test_settings(navigation_timeout_ms=100)
         page = FakePage()
         page.set_submit_enabled(False)
-        page.set_blur_enables_submit(False)  # Portal validation never satisfies
+        page.set_blur_enables_submit(False)  # Button never enables, forcing fallback
+        otp = FakeOtpProvider()
+
+        from cmp_auth import authenticate_cmp
+        result = authenticate_cmp(settings=settings, otp_provider=otp, page=page)
+
+        assert result is True
+        assert ("#password", "Tab") in page.press_calls
+        assert ("#password", "Enter") in page.press_calls
+
+    def test_fallback_failure_raises_authentication_error(self):
+        """When both direct submit and password Enter fail, raises AuthenticationError."""
+        settings = make_test_settings(navigation_timeout_ms=100)
+        page = FakePage()
+        page.set_submit_enabled(False)
+        page.set_blur_enables_submit(False)
+
+        def failing_press(selector, key):
+            if key == "Enter":
+                raise RuntimeError("Enter failed")
+        page.press = failing_press
+
         otp = FakeOtpProvider()
 
         from cmp_auth import AuthenticationError, authenticate_cmp
-        with pytest.raises(AuthenticationError, match="remained disabled"):
+        with pytest.raises(AuthenticationError, match="Could not submit initial login form"):
             authenticate_cmp(settings=settings, otp_provider=otp, page=page)
-
-        # The form event was attempted (smallest correct interaction: Tab blur),
-        # but no click of the initial submit was allowed.
-        assert page.press_calls == [("#password", "Tab")]
 
 
 class TestSecurityRiskReload:
@@ -390,7 +410,7 @@ class TestSecurityRiskReload:
                 self._locator_visible["#username"] = False
                 self._locator_visible["#password"] = False
             def title(self):
-                return "Security Risk"
+                return "Potential Security Risk"
             def reload(self, **kwargs):
                 self.reload_called = True
                 self.current_url = self._products_url

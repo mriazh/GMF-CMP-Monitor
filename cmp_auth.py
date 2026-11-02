@@ -147,12 +147,22 @@ def _do_authenticate(
 
             # Submit username/password form
             current_step = "submitting initial credentials form"
-            page.wait_for_selector("#fm1 input[name='submit']", state="visible", timeout=settings.navigation_timeout_ms)
-            _wait_for_initial_submit_enabled(page, settings)
+            submit_done = False
             try:
-                page.click(INITIAL_SUBMIT_SELECTOR, timeout=settings.navigation_timeout_ms, no_wait_after=True)
-            except TypeError:
-                page.click(INITIAL_SUBMIT_SELECTOR, timeout=settings.navigation_timeout_ms)
+                page.wait_for_selector(INITIAL_SUBMIT_VISIBLE_SELECTOR, state="visible", timeout=5000)
+                _wait_for_initial_submit_enabled(page, settings)
+                try:
+                    page.click(INITIAL_SUBMIT_SELECTOR, timeout=5000, no_wait_after=True)
+                except TypeError:
+                    page.click(INITIAL_SUBMIT_SELECTOR, timeout=5000)
+                submit_done = True
+            except Exception as sub_exc:
+                log.info("Direct submit button wait/click failed (%s); falling back to Enter on password", type(sub_exc).__name__)
+                try:
+                    page.press(PASSWORD_SELECTOR, "Enter")
+                    submit_done = True
+                except Exception as enter_exc:
+                    raise AuthenticationError("Could not submit initial login form") from enter_exc
             log.info("Initial form submitted")
 
             # Wait for OTP form to appear
@@ -409,7 +419,6 @@ def _wait_for_products_page(
     consecutive_rejections = 0
 
     last_log_time = 0.0
-    last_cas_nav_time = 0.0
     # First, wait for either root portal or products page (both indicate successful login)
     while clock.now() < deadline:
         try:
@@ -417,16 +426,6 @@ def _wait_for_products_page(
                 _try_bypass_neterror_warning(page)
 
             url = getattr(page, "url", "") or ""
-            if post_otp and clock.now() - start_time >= 8.0 and '/cas/login' in url and not approved_products and not approved_root:
-                now_t = clock.now()
-                if now_t - last_cas_nav_time >= 10.0:
-                    last_cas_nav_time = now_t
-                    log.info('Still on CAS URL after 8s post-OTP; navigating explicitly to products page')
-                    try:
-                        page.goto(settings.cmp_products_url, timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
-                    except Exception:
-                        pass
-                    continue
 
             if clock.now() - last_log_time >= 5.0:
                 last_log_time = clock.now()
@@ -443,7 +442,7 @@ def _wait_for_products_page(
                 try:
                     title = page.title() if hasattr(page, "title") else ""
                     title_lower = title.lower()
-                    error_keywords = ('server not found', 'problem loading page', 'security risk', 'warning', 'potential security risk', 'badcert')
+                    error_keywords = ('server not found', 'problem loading page', 'potential security risk', 'badcert')
                     if any(kw in title_lower for kw in error_keywords):
                         log.info('Page in error/warning state (%s); reloading to recover', title.strip())
                         clock.sleep(1.0)
