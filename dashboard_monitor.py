@@ -123,6 +123,23 @@ def _is_target_closed_error(exc: BaseException) -> bool:
     )
 
 
+def _has_vaadin_error_notification(page: object) -> bool:
+    """Check if page has visible Vaadin error notification or system overlay."""
+    if not hasattr(page, "locator"):
+        return False
+    for selector in ("div.v-Notification.error", "div.v-Notification.system", ".v-Notification-caption"):
+        try:
+            loc = page.locator(selector)
+            if hasattr(loc, "count") and loc.count() > 0:
+                for i in range(loc.count()):
+                    item = loc.nth(i)
+                    if hasattr(item, "is_visible") and item.is_visible():
+                        return True
+        except Exception:
+            pass
+    return False
+
+
 def _is_approved_origin(parsed: ParseResult) -> bool:
     """True if parsed URL matches the approved HTTPS origin strictly.
 
@@ -758,6 +775,17 @@ class ContinuousMonitor:
         unverified_polls = 0
         while self._clock.now() < deadline:
             self._clock.sleep(POLL_INTERVAL_SECONDS)
+            if getattr(self._page, "_has_js_error", False) or _has_vaadin_error_notification(self._page):
+                setattr(self._page, "_has_js_error", False)
+                log.warning("JavaScript error or error overlay detected; reloading page to recover via products")
+                try:
+                    self._page.reload(timeout=self._settings.navigation_timeout_ms, wait_until="domcontentloaded")
+                except Exception:
+                    try:
+                        self._page.goto(self._settings.cmp_products_url, timeout=self._settings.navigation_timeout_ms, wait_until="domcontentloaded")
+                    except Exception:
+                        pass
+                return self._handle_products_state()
             state = classify_state(self._page)
             if state == DashboardState.DASHBOARD:
                 verified = _is_verified_dashboard(self._page)

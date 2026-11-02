@@ -336,9 +336,13 @@ def main(
             if msg.type in ("warning", "error")
             else None,
         )
+        def _on_page_error(err):
+            log.error("Browser page error: %s", err)
+            setattr(page, "_has_js_error", True)
+
         page.on(
             "pageerror",
-            lambda err: log.error("Browser page error: %s", err),
+            _on_page_error,
         )
 
         log.info("Connecting to IMAP...")

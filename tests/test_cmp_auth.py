@@ -377,6 +377,33 @@ class TestDisabledInitialSubmit:
         # The form event was attempted (smallest correct interaction: Tab blur),
         # but no click of the initial submit was allowed.
         assert page.press_calls == [("#password", "Tab")]
+
+
+class TestSecurityRiskReload:
+    def test_security_risk_title_triggers_reload(self):
+        settings = make_test_settings()
+        class SecurityRiskFakePage(FakePage):
+            def __init__(self):
+                super().__init__()
+                self.reload_called = False
+                self.current_url = "https://ep.iotcc.telkomsel.com/cas/login"
+                self._locator_visible["#username"] = False
+                self._locator_visible["#password"] = False
+            def title(self):
+                return "Security Risk"
+            def reload(self, **kwargs):
+                self.reload_called = True
+                self.current_url = self._products_url
+                self._state = "products"
+
+        page = SecurityRiskFakePage()
+        clock = FakeClock()
+        from cmp_auth import _wait_for_products_page
+        try:
+            _wait_for_products_page(page, settings, clock, post_otp=True)
+        except Exception:
+            pass
+        assert page.reload_called
         assert "#fm1 input[name='submit'][type='submit']" not in page.clicks
 
     def test_submit_enabled_by_form_event_then_clicked(self):

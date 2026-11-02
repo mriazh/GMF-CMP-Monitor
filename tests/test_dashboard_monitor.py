@@ -862,6 +862,53 @@ class TestDashboardMenuNavigationTiming:
         with pytest.raises(RecoveryError):
             navigate_to_dashboard(page, settings, clock=FakeClock())
 
+    def test_js_error_or_vaadin_notification_triggers_reload_and_recovery(self):
+        from dashboard_monitor import ContinuousMonitor
+
+        class SteadyClock:
+            def __init__(self):
+                self.current_time = 0.0
+
+            def now(self):
+                return self.current_time
+
+            def sleep(self, seconds):
+                self.current_time += seconds
+
+        class ErrorNotificationPage(FakePage):
+            def __init__(self):
+                super().__init__("https://ep.iotcc.telkomsel.com/#!dashboard")
+                self._dashboard_ready = True
+                self._state = "dashboard"
+                self.reload_called = False
+
+            def reload(self, **kwargs):
+                self.reload_called = True
+                self._url = self._products_url
+                self._state = "products"
+                self._dashboard_ready = False
+
+            def locator(self, selector, has_text=None):
+                if selector == "div.v-Notification.error":
+                    return FakeLocator(True)
+                return super().locator(selector, has_text=has_text)
+
+        settings = make_test_settings()
+        page = ErrorNotificationPage()
+        page.set_menu_visible(True)
+        monitor = ContinuousMonitor(
+            settings=settings,
+            page=page,
+            otp_provider=FakeOtpProvider(),
+            clock=SteadyClock(),
+        )
+
+        try:
+            monitor._monitor_dashboard_state()
+        except Exception:
+            pass
+        assert page.reload_called
+
 
 class TestProductsRedirectBackToDashboard:
 

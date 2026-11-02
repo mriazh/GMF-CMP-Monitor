@@ -360,7 +360,15 @@ def _is_playwright_page(page: object) -> bool:
     return hasattr(page, "context") and hasattr(page, "goto")
 
 
+_last_bypass_attempt = 0.0
+
+
 def _try_bypass_neterror_warning(p: object) -> bool:
+    global _last_bypass_attempt
+    now = time.time()
+    if now - _last_bypass_attempt < 3.0:
+        return False
+    _last_bypass_attempt = now
     try:
         title = getattr(p, 'title', lambda: '')() or ''
         url = getattr(p, 'url', '') or ''
@@ -401,6 +409,7 @@ def _wait_for_products_page(
     consecutive_rejections = 0
 
     last_log_time = 0.0
+    last_cas_nav_time = 0.0
     # First, wait for either root portal or products page (both indicate successful login)
     while clock.now() < deadline:
         try:
@@ -408,6 +417,17 @@ def _wait_for_products_page(
                 _try_bypass_neterror_warning(page)
 
             url = getattr(page, "url", "") or ""
+            if post_otp and clock.now() - start_time >= 8.0 and '/cas/login' in url and not approved_products and not approved_root:
+                now_t = clock.now()
+                if now_t - last_cas_nav_time >= 10.0:
+                    last_cas_nav_time = now_t
+                    log.info('Still on CAS URL after 8s post-OTP; navigating explicitly to products page')
+                    try:
+                        page.goto(settings.cmp_products_url, timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
+                    except Exception:
+                        pass
+                    continue
+
             if clock.now() - last_log_time >= 5.0:
                 last_log_time = clock.now()
                 try:
@@ -418,14 +438,19 @@ def _wait_for_products_page(
             approved_root = _is_root_portal(url)
             approved_products = _is_products_page(url)
 
-            # If the browser hit an in-flight network cutover error (e.g. 'Server Not Found'), reload over WARP
+            # If the browser hit an in-flight network cutover error or security warning, reload to recover
             if not approved_products and not approved_root:
                 try:
                     title = page.title() if hasattr(page, "title") else ""
-                    if "server not found" in title.lower() or "problem loading page" in title.lower():
-                        log.info("Page in error state ('%s'); reloading over WARP", title.strip())
+                    title_lower = title.lower()
+                    error_keywords = ('server not found', 'problem loading page', 'security risk', 'warning', 'potential security risk', 'badcert')
+                    if any(kw in title_lower for kw in error_keywords):
+                        log.info('Page in error/warning state (%s); reloading to recover', title.strip())
                         clock.sleep(1.0)
-                        page.reload(timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
+                        try:
+                            page.reload(timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
+                        except Exception:
+                            page.goto(settings.cmp_products_url, timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
                         continue
                     if "log in successful" in title.lower() or "login successful" in title.lower():
                         log.info("CAS reported '%s'; navigating to products page", title.strip())
