@@ -469,7 +469,9 @@ def _wait_for_products_page(
                         "potential security risk",
                         "badcert",
                     )
-                    if any(kw in title_lower for kw in error_keywords):
+                    # Enforce 15s post-OTP grace period before any error-title recovery navigation
+                    post_otp_grace_elapsed = not post_otp or (clock.now() - start_time >= 15.0)
+                    if post_otp_grace_elapsed and any(kw in title_lower for kw in error_keywords):
                         log.info("Page in error/warning state ('%s'); navigating directly to products URL to recover", title.strip())
                         clock.sleep(1.0)
                         try:
