@@ -405,6 +405,14 @@ def _try_bypass_neterror_warning(p: object) -> bool:
             adv = p.locator('#advancedButton').first
             if hasattr(adv, 'is_visible') and adv.is_visible():
                 adv.click()
+                # Wait for the exception dialog button to appear after expanding advanced options
+                try:
+                    if hasattr(p, "wait_for_selector"):
+                        p.wait_for_selector("#exceptionDialogButton", timeout=5000, state="visible")
+                    elif hasattr(p, "wait_for_timeout"):
+                        p.wait_for_timeout(1000)
+                except Exception:
+                    pass
             accept = p.locator('#exceptionDialogButton').first
             if hasattr(accept, 'is_visible') and accept.is_visible():
                 accept.click()
@@ -472,20 +480,15 @@ def _wait_for_products_page(
                     # Enforce 15s post-OTP grace period before any error-title recovery navigation
                     post_otp_grace_elapsed = not post_otp or (clock.now() - start_time >= 15.0)
                     if post_otp_grace_elapsed and any(kw in title_lower for kw in error_keywords):
-                        log.info("Page in error/warning state ('%s'); navigating directly to products URL to recover", title.strip())
+                        log.info("Page in error/warning state ('%s'); reloading to recover", title.strip())
                         clock.sleep(1.0)
                         try:
-                            page.goto(
-                                settings.cmp_products_url,
+                            page.reload(
                                 timeout=settings.navigation_timeout_ms,
                                 wait_until="domcontentloaded",
                             )
                         except Exception as nav_err:
-                            log.debug("Direct goto products error: %s; attempting reload", nav_err)
-                            try:
-                                page.reload(timeout=settings.navigation_timeout_ms, wait_until="domcontentloaded")
-                            except Exception:
-                                pass
+                            log.debug("Reload error: %s", nav_err)
                         continue
                     if "log in successful" in title.lower() or "login successful" in title.lower():
                         log.info("CAS reported '%s'; navigating to products page", title.strip())

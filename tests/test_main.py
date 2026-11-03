@@ -1152,5 +1152,5 @@ class TestMainVpnLifecycle:
                     checkpoint_factory=lambda *a: MagicMock(),
                 )
                 assert res == 0
-                assert mock_warp.restart_fresh.call_count == 3
+                assert mock_warp.restart_fresh.call_count == 2
                 mock_imap.connect.assert_called_once()

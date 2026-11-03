@@ -189,7 +189,7 @@ def main(
         ):
             connectivity.ensure_imap_reachable()
             if settings.warp_mode == "proxy":
-                connectivity.prepare_warp()
+                connectivity.prepare_warp(restart=settings.warp_restart_on_startup)
                 log.info("WARP SOCKS5 proxy ready on port %d", settings.warp_proxy_port)
                 # Preflight check with restart on failure once
                 preflight_ok = False

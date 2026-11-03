@@ -435,7 +435,7 @@ class TestSecurityRiskReload:
         except Exception:
             pass
         assert page.current_url == settings.cmp_products_url
-        assert any(url == settings.cmp_products_url for url, _ in page.urls) or any(u == settings.cmp_products_url for u, _, _ in getattr(page, "goto_calls", []))
+        assert page.reload_called is True
 
     def test_submit_enabled_by_form_event_then_clicked(self):
         """A disabled button that becomes enabled after a blur event is clicked normally."""

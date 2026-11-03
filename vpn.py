@@ -739,16 +739,12 @@ class ConnectivityController:
                 self._sleep(self.settings.checkpoint_status_poll_interval_seconds)
         raise last_error or CheckPointError("Check Point connection failed")
 
-    def prepare_warp(self) -> None:
+    def prepare_warp(self, restart: bool = False) -> None:
         last_error: WarpError | None = None
         for attempt in range(1, self.settings.warp_retry_limit + 1):
             try:
-                if self.settings.warp_restart_on_startup:
-                    if hasattr(self.warp, "restart_fresh"):
-                        self.warp.restart_fresh()
-                    else:
-                        self.warp.connect()
-                        self.warp.validate()
+                if restart and hasattr(self.warp, "restart_fresh"):
+                    self.warp.restart_fresh()
                 else:
                     self.warp.connect()
                     self.warp.validate()
@@ -785,7 +781,7 @@ class ConnectivityController:
 
     def finish_authentication(self) -> None:
         self.disconnect_checkpoint_after_imap()
-        self.prepare_warp()
+        self.prepare_warp(restart=False)
 
     def cleanup(self) -> None:
         try:
