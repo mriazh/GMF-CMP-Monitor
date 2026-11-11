@@ -410,6 +410,10 @@ def _wait_for_vaadin_loading(page: object, settings: Settings, clock: Clock, tim
             elapsed = clock.now() - start_time
             log.info("Vaadin SPA menu became visible after %.1fs", elapsed)
             return
+        if classify_state(page) == DashboardState.AUTH_EXPIRED:
+            raise AuthenticationRequiredError(
+                "Authentication required while waiting for Vaadin SPA menu"
+            )
         current_url = getattr(page, "url", "") or ""
         now = clock.now()
         if now - last_diag_log >= 10.0:
@@ -425,7 +429,7 @@ def _wait_for_vaadin_loading(page: object, settings: Settings, clock: Clock, tim
                 pass
         # If after 25s the SPA menu hasn't mounted, perform a reload of the page
         # because the Vaadin client bootstrap script may have stalled on the initial redirect.
-        if now - last_reload_time >= 25.0:
+        if now - last_reload_time >= 60.0:
             last_reload_time = now
             try:
                 log.info("SPA menu not loaded yet; performing reload of products page (attempting mount recovery)")
@@ -501,6 +505,16 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
                 left_products_seen = True
                 log.info("Menu click in flight; route left products (state=%s)", state.name)
             else:
+                # Stalled click: if waiting >= 5s on PRODUCTS without leaving,
+                # reset clicked to re-click the Dashboard menu item.
+                if not left_products_seen and clock.now() - clicked_time >= 5.0:
+                    log.info(
+                        "Menu click stalled on PRODUCTS for 5s without transition; resetting to re-click"
+                    )
+                    clicked = False
+                    clicked_time = 0.0
+                    clock.sleep(POLL_INTERVAL_SECONDS)
+                    continue
                 can_retry = left_products_seen
                 if not can_retry:
                     log.debug("Menu click in flight; waiting for route transition")
@@ -934,6 +948,7 @@ class ContinuousMonitor:
         deadline = self._clock.now() + (self._settings.navigation_timeout_ms / 1000.0)
         verified_polls = 0
         unknown_polls = 0
+        unverified_dashboard_polls = 0
         while self._clock.now() < deadline:
             self._clock.sleep(POLL_INTERVAL_SECONDS)
             state = classify_state(self._page)
@@ -947,6 +962,13 @@ class ContinuousMonitor:
                     log.debug("Post-reload dashboard verified once; confirming")
                 else:
                     verified_polls = 0
+                    unverified_dashboard_polls += 1
+                    if unverified_dashboard_polls >= 15:
+                        log.info(
+                            "Post-reload URL reports dashboard but UI unverified for 15s; "
+                            "returning PRODUCTS for recovery"
+                        )
+                        return DashboardState.PRODUCTS
                     log.debug("Post-reload URL reports dashboard but UI not verified")
                 continue
             verified_polls = 0

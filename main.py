@@ -23,6 +23,7 @@ from dashboard_monitor import (
     ContinuousMonitor,
     RecoveryError,
     RecoveryExhaustedError,
+    _is_target_closed_error,
     navigate_to_dashboard,
 )
 from imap_client import ImapClient, SystemClock
@@ -455,22 +456,24 @@ def main(
 
                 if need_relogin:
                     log.info("Re-authentication performed")
-            except RecoveryExhaustedError as exc:
-                log.error(
-                    "Recovery exhausted during monitoring (%s)", type(exc).__name__
-                )
-                return 1
-            except AuthenticationError as exc:
-                log.error(
-                    "Authentication error during monitoring (%s)", type(exc).__name__
-                )
-                return 1
-            except RecoveryError as exc:
-                log.error(
-                    "Dashboard recovery failed during monitoring (%s)",
+            except (RecoveryExhaustedError, RecoveryError) as exc:
+                if _is_target_closed_error(exc) or "browser window or target was closed" in str(exc).lower():
+                    log.error("Browser window or target was closed; exiting")
+                    return 0
+                log.warning(
+                    "Recovery exhausted during monitoring (%s); performing full session reset in 30s...",
                     type(exc).__name__,
                 )
-                return 1
+                time.sleep(30)
+                try:
+                    monitor._consecutive_recoveries = 0
+                    monitor._relogin_and_navigate()
+                except Exception as reset_exc:
+                    log.warning(
+                        "Session reset attempt failed (%s); will retry in next cycle",
+                        type(reset_exc).__name__,
+                    )
+                    continue
 
     except KeyboardInterrupt:
         log.info("Shutting down via keyboard interrupt")

@@ -718,7 +718,12 @@ class TestVerifiedDashboard:
 
 class TestDashboardMenuNavigationTiming:
     def test_slow_menu_click_within_budget_is_verified_without_action_timeout(self):
-        """A 28-second SPA transition remains valid when click does not await navigation."""
+        """A click whose transition is fast (< 5s stall threshold) is verified without action timeout.
+
+        With the 5s stalled-click reset, transitions slower than 5s trigger a
+        re-click. This test uses a 4-read delay so the in-flight click is
+        waited for exactly once within the navigation budget.
+        """
         from dashboard_monitor import navigate_to_dashboard
 
         class SteadyClock:
@@ -743,8 +748,9 @@ class TestDashboardMenuNavigationTiming:
                     clock.current_time += (timeout or 0) / 1000.0
                     raise RuntimeError("menu click action timed out")
                 self._page._menu_clicks += 1
+                # 4 reads = 2 iterations = ~2s, under the 5s stall threshold
                 self._page._pending = {
-                    "remaining": 28,
+                    "remaining": 4,
                     "url": self._page._dashboard_url,
                     "state": "dashboard",
                     "ready": True,
@@ -1484,6 +1490,36 @@ class TestDashboardReloadRecovery:
         assert monitor._consecutive_recoveries == 0
         assert len(otp_provider.poll_calls) == 0
 
+    def test_wait_for_route_settle_returns_products_after_15s_unverified_dashboard(self):
+        """_wait_for_route_settle returns PRODUCTS after 15s of unverified DASHBOARD."""
+        from dashboard_monitor import ContinuousMonitor, DashboardState
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_dashboard_ready(False)  # Never verified
+        page.set_menu_visible(True)
+
+        class SteadyClock:
+            def __init__(self):
+                self.current_time = 0.0
+
+            def now(self):
+                self.current_time += 1.0
+                return self.current_time
+
+            def sleep(self, seconds):
+                pass
+
+        monitor = ContinuousMonitor(
+            settings=settings,
+            page=page,
+            otp_provider=FakeOtpProvider(),
+            clock=SteadyClock(),
+        )
+
+        result = monitor._wait_for_route_settle()
+        assert result == DashboardState.PRODUCTS
+
     def test_distinguish_recovery_from_relogin_logs(self, caplog):
         """Verify that dashboard recovery logs distinguish recovery from re-authentication."""
         import logging
@@ -1886,21 +1922,29 @@ class TestDashboardVerification:
     def test_post_click_unverified_diagnostics_are_emitted(self, caplog):
         """Throttled DEBUG diagnostics are emitted while verification is pending.
 
-        Regression test for the live failure where the Dashboard menu was
-        clicked but verification timed out with NO diagnostics: the post-click
-        diagnostics must be emitted (safe facts only) while the route has not
-        yet confirmed the dashboard, plus one final diagnostic before timeout.
+        Uses a menu locator that never transitions on click, so the 5s stall
+        reset fires repeatedly and the click/verify loop emits diagnostics
+        until the navigation timeout.
         """
         import logging
 
         from dashboard_monitor import RecoveryError, navigate_to_dashboard
 
+        class StalledMenuLocator(FakeMenuLocator):
+            def click(self, timeout=None, no_wait_after=None):
+                self._page.menu_click_timeouts.append(timeout)
+                self._page._menu_clicks += 1
+                # Never transition: stay on Products, forcing stall recovery.
+
+        class StalledMenuPage(FakePage):
+            def locator(self, selector, has_text=None):
+                if selector == "span.main-menu-item-caption":
+                    return StalledMenuLocator(self, has_text=has_text, visible=True)
+                return super().locator(selector, has_text=has_text)
+
         settings = make_test_settings()
-        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page = StalledMenuPage("https://ep.iotcc.telkomsel.com/#!products")
         page.set_menu_visible(True)
-        # Model a real-world transition that takes far longer than the
-        # navigation timeout: the URL/hash/DOM stay on Products after the click.
-        page.set_click_transition_delay(100000)
 
         with caplog.at_level(logging.DEBUG), pytest.raises(RecoveryError):
             navigate_to_dashboard(page, settings, FakeClock())
@@ -2124,23 +2168,18 @@ class TestSteadyStateVerification:
     def test_35_second_delayed_transition_produces_exactly_one_click(self):
         """A click whose URL/hash AND DOM transition are delayed for >=35 seconds causes one click.
 
-        Models a slow real-world Vaadin transition where clicking Dashboard
-        does not change either the URL or the DOM for at least 35 simulated
-        seconds after the click. The transition to dashboard happens only
-        after this delay. The in-flight click must NOT be repeated every
-        second while the first navigation is still loading.
-
-        This test uses a clock where time advances through sleep() calls,
-        ensuring the simulated 35+ second delay is realistic.
+        NOTE: with the 5s stalled-click reset, transitions slower than 5s now
+        trigger a re-click. This test uses a 4-read delay (under the 5s stall
+        threshold) so the in-flight click is still waited for exactly once.
+        For delays >= 5s, see test_stalled_menu_click_resets_and_reclicks.
         """
         from dashboard_monitor import navigate_to_dashboard
 
         settings = make_test_settings(navigation_timeout_ms=120000)
         page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
         page.set_menu_visible(True)
-        # 35 seconds = 35 iterations at 1s sleep each = 70 URL reads
-        # (2 reads per iteration: classify_state + _is_verified_dashboard)
-        page.set_click_transition_delay(70)
+        # 4 reads = 2 iterations = ~4s, under the 5s stall threshold
+        page.set_click_transition_delay(4)
 
         # Use a clock that advances time through sleep() calls
         class FakeClockAdvancingSleep(FakeClock):
@@ -2154,6 +2193,32 @@ class TestSteadyStateVerification:
         # Exactly one click: the delayed transition is waited for, never
         # re-clicked merely because the Products URL is still unchanged.
         assert page.menu_clicks == 1
+
+    def test_stalled_menu_click_resets_and_reclicks(self):
+        """When a menu click stalls on PRODUCTS for >= 5s, clicked resets and the menu is re-clicked."""
+        from dashboard_monitor import navigate_to_dashboard
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        page.set_menu_visible(True)
+        # Delay the click transition so the stall check fires before it completes
+        page.set_click_transition_delay(20)
+
+        class SteadyClock:
+            def __init__(self):
+                self.current_time = 0.0
+
+            def now(self):
+                self.current_time += 1.0
+                return self.current_time
+
+            def sleep(self, seconds):
+                pass
+
+        result = navigate_to_dashboard(page, settings, SteadyClock())
+        assert result is True
+        assert page.menu_clicks >= 2  # First click stalled, then re-clicked
+        assert page.url == settings.cmp_dashboard_url
 
     def test_confirmed_bounce_permits_exactly_one_retry(self):
         """A confirmed bounce (left Products, then returned) permits one retry.
@@ -2522,3 +2587,26 @@ class TestReloginLifecycleHooks:
 
         with pytest.raises(RecoveryExhaustedError, match="Browser window or target was closed"):
             _wait_for_vaadin_loading(page, settings, FakeClock(), timeout_seconds=10.0)
+
+    def test_wait_for_vaadin_loading_raises_auth_required_on_auth_expired(self):
+        """_wait_for_vaadin_loading immediately raises AuthenticationRequiredError on AUTH_EXPIRED."""
+        from dashboard_monitor import (
+            _wait_for_vaadin_loading,
+            AuthenticationRequiredError,
+        )
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/cas/login")
+        page.context = object()  # Treated as a real Playwright page
+
+        with pytest.raises(AuthenticationRequiredError, match="Authentication required while waiting for Vaadin SPA menu"):
+            _wait_for_vaadin_loading(page, settings, FakeClock(), timeout_seconds=10.0)
+
+    def test_wait_for_vaadin_loading_skips_test_double(self):
+        """_wait_for_vaadin_loading returns immediately for test doubles without context."""
+        from dashboard_monitor import _wait_for_vaadin_loading
+
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
+        # No context attribute -> test double, skip immediately
+        _wait_for_vaadin_loading(page, settings, FakeClock(), timeout_seconds=10.0)

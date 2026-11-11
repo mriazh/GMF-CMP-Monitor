@@ -469,9 +469,54 @@ class TestGracefulShutdown:
 
 
 class TestRecoveryExhaustedReturnsError:
+    @patch("main.time.sleep")
     @patch("main.navigate_to_dashboard")
-    def test_recovery_exhausted_returns_one(self, mock_navigate):
-        """Test that RecoveryExhaustedError returns 1."""
+    def test_recovery_exhausted_does_not_exit_when_browser_open(
+        self, mock_navigate, mock_sleep
+    ):
+        """Test that RecoveryExhaustedError does not exit when browser is open;
+        instead it cooldowns, resets, relogins, and continues the loop."""
+        from dashboard_monitor import RecoveryExhaustedError
+
+        with patch("main.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+
+            with patch("main.ImapClient") as mock_imap_class:
+                mock_imap = MagicMock()
+                mock_imap_class.return_value = mock_imap
+
+                with patch("main.authenticate_cmp"):
+                    with patch("main.ContinuousMonitor") as mock_monitor_class:
+                        mock_monitor = MagicMock()
+                        mock_monitor.monitor_once.side_effect = [
+                            RecoveryExhaustedError("Max retries"),
+                            KeyboardInterrupt(),
+                        ]
+                        mock_monitor_class.return_value = mock_monitor
+
+                        import main
+
+                        result = main.main(env=TEST_ENV)
+
+                        assert result == 0
+                        mock_sleep.assert_called_once_with(30)
+                        mock_monitor._relogin_and_navigate.assert_called_once()
+                        assert mock_monitor._consecutive_recoveries == 0
+
+    @patch("main.time.sleep")
+    @patch("main.navigate_to_dashboard")
+    def test_recovery_exhausted_exits_when_browser_closed(
+        self, mock_navigate, mock_sleep
+    ):
+        """Test that RecoveryExhaustedError from a closed browser exits cleanly with 0."""
         from dashboard_monitor import RecoveryExhaustedError
 
         with patch("main.sync_playwright") as mock_sync:
@@ -493,7 +538,7 @@ class TestRecoveryExhaustedReturnsError:
                     with patch("main.ContinuousMonitor") as mock_monitor_class:
                         mock_monitor = MagicMock()
                         mock_monitor.monitor_once.side_effect = RecoveryExhaustedError(
-                            "Max retries"
+                            "Browser window or target was closed"
                         )
                         mock_monitor_class.return_value = mock_monitor
 
@@ -501,7 +546,9 @@ class TestRecoveryExhaustedReturnsError:
 
                         result = main.main(env=TEST_ENV)
 
-                        assert result == 1
+                        assert result == 0
+                        mock_sleep.assert_not_called()
+                        mock_monitor._relogin_and_navigate.assert_not_called()
 
 
 class TestAuthenticationErrorReturnsError:
@@ -899,7 +946,8 @@ class TestLoggingSetup:
 
 class TestExceptionTracebackAndCleanupLogging:
     @patch("main.navigate_to_dashboard")
-    def test_monitoring_recovery_exhausted_uses_safe_fixed_context(self, mock_navigate):
+    @patch("main.time.sleep")
+    def test_monitoring_recovery_exhausted_uses_safe_fixed_context(self, mock_sleep, mock_navigate):
         from dashboard_monitor import RecoveryExhaustedError
 
         with patch("main.sync_playwright") as mock_sync:
@@ -920,9 +968,10 @@ class TestExceptionTracebackAndCleanupLogging:
                 with patch("main.authenticate_cmp"):
                     with patch("main.ContinuousMonitor") as mock_monitor_class:
                         mock_monitor = MagicMock()
-                        mock_monitor.monitor_once.side_effect = RecoveryExhaustedError(
-                            "sensitive_token_abc123"
-                        )
+                        mock_monitor.monitor_once.side_effect = [
+                            RecoveryExhaustedError("sensitive_token_abc123"),
+                            KeyboardInterrupt(),
+                        ]
                         mock_monitor_class.return_value = mock_monitor
 
                         with patch("main.log") as mock_log:
@@ -930,11 +979,12 @@ class TestExceptionTracebackAndCleanupLogging:
 
                             result = main.main(env=TEST_ENV)
 
-                            assert result == 1
-                            mock_log.error.assert_called_with(
-                                "Recovery exhausted during monitoring (%s)",
+                            assert result == 0
+                            mock_log.warning.assert_called_with(
+                                "Recovery exhausted during monitoring (%s); performing full session reset in 30s...",
                                 "RecoveryExhaustedError",
                             )
+                            mock_sleep.assert_called_once_with(30)
 
     @patch("main.navigate_to_dashboard")
     def test_cleanup_failure_logged_as_warning(self, mock_navigate):
