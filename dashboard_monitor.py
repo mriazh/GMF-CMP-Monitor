@@ -379,6 +379,56 @@ def _is_playwright_page(page: object) -> bool:
     return hasattr(page, "context") and hasattr(page, "goto")
 
 
+def _dismiss_error_dialog(page: object) -> bool:
+    """Detect and dismiss Vaadin modal error dialog ('Sorry, something went wrong!').
+
+    In Vaadin 7, server-side error windows persist across page reloads and re-logins
+    until explicitly closed by clicking the close box (div.v-window-closebox).
+    Returns True if a dialog was dismissed, False otherwise.
+    """
+    if not hasattr(page, "locator"):
+        return False
+    try:
+        close_selectors = (
+            'div.v-window:has-text("Sorry, something went wrong") .v-window-closebox',
+            'div.v-window:has-text("something went wrong") [class*="close"]',
+            'div.v-window:has-text("The service is not working properly") .v-window-closebox',
+            'div.v-window .v-window-closebox',
+            '.v-window-closebox',
+            'div[role="dialog"] [class*="close"]',
+            '[class*="v-window-closebox"]',
+        )
+        for sel in close_selectors:
+            try:
+                close_btn = page.locator(sel).first
+                if hasattr(close_btn, "is_visible") and close_btn.is_visible():
+                    log.info("Detected modal error dialog; clicking close button (%s)", sel)
+                    close_btn.click(timeout=3000, no_wait_after=True)
+                    return True
+            except Exception:
+                pass
+
+        # Check for error text so an un-styled modal can be dismissed via Escape.
+        error_indicators = (
+            "Sorry, something went wrong",
+            "The service is not working properly",
+            "SYS0001",
+        )
+        for text in error_indicators:
+            try:
+                loc = page.locator(f':text("{text}")').first
+                if hasattr(loc, "is_visible") and loc.is_visible():
+                    log.info("Detected modal error text ('%s'); attempting Escape key dismissal", text)
+                    if hasattr(page, "keyboard") and hasattr(page.keyboard, "press"):
+                        page.keyboard.press("Escape")
+                        return True
+            except Exception:
+                pass
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Error while attempting to dismiss dialog: %s", exc)
+    return False
+
+
 def _wait_for_vaadin_loading(page: object, settings: Settings, clock: Clock, timeout_seconds: float) -> None:
     """Wait for the Vaadin SPA menu to become visible before navigation polling.
 
@@ -406,6 +456,7 @@ def _wait_for_vaadin_loading(page: object, settings: Settings, clock: Clock, tim
     last_diag_log = 0.0
     last_reload_time = start_time
     while clock.now() < deadline:
+        _dismiss_error_dialog(page)
         if _visible_dashboard_menu(page) is not None:
             elapsed = clock.now() - start_time
             log.info("Vaadin SPA menu became visible after %.1fs", elapsed)
@@ -467,6 +518,7 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
     # Pre-wait: the Vaadin 7 SPA shell may take up to 90s to fully load and
     # render the menu items. Poll for the menu to appear (or the v-app-loading
     # indicator to disappear) before starting the main navigation deadline.
+    _dismiss_error_dialog(page)
     _wait_for_vaadin_loading(page, settings, clock, VAADIN_BOOTSTRAP_TIMEOUT_SECONDS)
     navigation_timeout_seconds = settings.navigation_timeout_ms / 1000.0
     deadline = clock.now() + navigation_timeout_seconds
@@ -508,6 +560,7 @@ def _click_dashboard_menu(page: object, settings: Settings, clock: Clock) -> boo
                 # Stalled click: if waiting >= 5s on PRODUCTS without leaving,
                 # reset clicked to re-click the Dashboard menu item.
                 if not left_products_seen and clock.now() - clicked_time >= 5.0:
+                    _dismiss_error_dialog(page)
                     log.info(
                         "Menu click stalled on PRODUCTS for 5s without transition; resetting to re-click"
                     )
@@ -597,6 +650,8 @@ def navigate_to_dashboard(
     """
     if clock is None:
         clock = SystemClock()
+
+    _dismiss_error_dialog(page)
 
     state = classify_state(page)
     if state == DashboardState.AUTH_EXPIRED:
@@ -789,6 +844,9 @@ class ContinuousMonitor:
         unverified_polls = 0
         while self._clock.now() < deadline:
             self._clock.sleep(POLL_INTERVAL_SECONDS)
+            if _dismiss_error_dialog(self._page):
+                log.info("Error dialog dismissed during dashboard monitoring; re-navigating to Dashboard")
+                return self._handle_products_state()
             if getattr(self._page, "_has_js_error", False) or _has_vaadin_error_notification(self._page):
                 setattr(self._page, "_has_js_error", False)
                 log.warning("JavaScript error or error overlay detected; navigating directly to products URL to recover")

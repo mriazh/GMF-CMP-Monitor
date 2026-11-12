@@ -2610,3 +2610,91 @@ class TestReloginLifecycleHooks:
         page = FakePage("https://ep.iotcc.telkomsel.com/#!products")
         # No context attribute -> test double, skip immediately
         _wait_for_vaadin_loading(page, settings, FakeClock(), timeout_seconds=10.0)
+
+
+class _DismissKeyboard:
+    def __init__(self):
+        self.presses = []
+
+    def press(self, key):
+        self.presses.append(key)
+
+
+class _DismissCloseLocator:
+    def __init__(self, page, visible):
+        self._page = page
+        self._visible = visible
+
+    @property
+    def first(self):
+        return self
+
+    def is_visible(self):
+        return self._visible
+
+    def click(self, timeout=None, no_wait_after=None):
+        self._page.clicks.append(("click",))
+
+
+class _DismissErrorPage:
+    """Models a page that may or may not show a Vaadin error modal."""
+
+    def __init__(self, close_visible=False, error_text_visible=False, has_keyboard=True):
+        self._close_visible = close_visible
+        self._error_text_visible = error_text_visible
+        self.clicks = []
+        self.keyboard = _DismissKeyboard() if has_keyboard else None
+
+    def locator(self, selector):
+        if "closebox" in selector or '[class*="close"]' in selector:
+            return _DismissCloseLocator(self, self._close_visible)
+        return _DismissCloseLocator(self, self._error_text_visible)
+
+
+class TestDismissErrorDialog:
+    """Unit tests for the Vaadin error modal auto-dismissal helper."""
+
+    def test_dismisses_by_clicking_closebox(self):
+        from dashboard_monitor import _dismiss_error_dialog
+
+        page = _DismissErrorPage(close_visible=True)
+        assert _dismiss_error_dialog(page) is True
+        assert page.clicks == [("click",)]
+        assert page.keyboard.presses == []
+
+    def test_escape_fallback_when_closebox_not_visible(self):
+        from dashboard_monitor import _dismiss_error_dialog
+
+        page = _DismissErrorPage(close_visible=False, error_text_visible=True)
+        assert _dismiss_error_dialog(page) is True
+        assert page.clicks == []
+        assert page.keyboard.presses == ["Escape"]
+
+    def test_escape_fallback_detects_sys0001(self):
+        from dashboard_monitor import _dismiss_error_dialog
+
+        page = _DismissErrorPage(close_visible=False, error_text_visible=True)
+        assert _dismiss_error_dialog(page) is True
+        assert page.keyboard.presses == ["Escape"]
+
+    def test_returns_false_when_no_dialog(self):
+        from dashboard_monitor import _dismiss_error_dialog
+
+        page = _DismissErrorPage(close_visible=False, error_text_visible=False)
+        assert _dismiss_error_dialog(page) is False
+        assert page.clicks == []
+        assert page.keyboard.presses == []
+
+    def test_returns_false_for_object_without_locator(self):
+        from dashboard_monitor import _dismiss_error_dialog
+
+        class _NoLocator:
+            pass
+
+        assert _dismiss_error_dialog(_NoLocator()) is False
+
+    def test_returns_false_when_error_text_visible_but_no_keyboard(self):
+        from dashboard_monitor import _dismiss_error_dialog
+
+        page = _DismissErrorPage(close_visible=False, error_text_visible=True, has_keyboard=False)
+        assert _dismiss_error_dialog(page) is False

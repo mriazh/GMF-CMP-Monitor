@@ -451,6 +451,10 @@ def _wait_for_products_page(
             if clock.now() - start_time > 3.0:
                 _try_bypass_neterror_warning(page)
 
+            # Dismiss any Vaadin error modal blocking the post-login landing.
+            from dashboard_monitor import _dismiss_error_dialog  # lazy: avoid circular import
+            _dismiss_error_dialog(page)
+
             url = getattr(page, "url", "") or ""
 
             if clock.now() - last_log_time >= 5.0:
