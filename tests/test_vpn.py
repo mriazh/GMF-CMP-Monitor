@@ -837,3 +837,120 @@ def test_preflight_tls_verification_can_be_disabled():
     # When disabled, context should have verification off
     assert context.verify_mode == ssl.CERT_NONE
     assert context.check_hostname is False
+
+
+def test_prepare_warp_preserves_original_error_when_cleanup_disconnect_fails():
+    """Cleanup disconnect WarpError must not shadow the connect/validate failure."""
+    primary_error = WarpError("WARP connect failed")
+
+    class Warp:
+        owned = True
+
+        def connect(self):
+            raise primary_error
+
+        def validate(self):
+            pass
+
+        def disconnect(self):
+            raise WarpError("WARP disconnect failed")
+
+    controller = ConnectivityController(
+        settings(WARP_RETRY_LIMIT="1", WARP_STATUS_POLL_INTERVAL_SECONDS="0.1"),
+        object(),
+        object(),
+        Warp(),
+        sleeper=lambda _: None,
+    )
+    with pytest.raises(WarpError) as exc_info:
+        controller.prepare_warp()
+    assert exc_info.value is primary_error
+    assert "disconnect failed" not in str(exc_info.value)
+
+
+def test_restart_fresh_does_not_set_owned_when_connect_fails():
+    """restart_fresh must not pre-mark owned; connect() sets owned on success only."""
+
+    class WarpFailingConnect(WarpClient):
+        def connect(self):
+            raise WarpError("connect failed")
+
+    client = WarpFailingConnect(settings(WARP_CLI_PATH="warp-cli"), runner=lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    with pytest.raises(WarpError):
+        client.restart_fresh()
+    assert client.owned is False
+
+
+def test_ensure_warp_proxy_healthy_restarts_when_port_down(monkeypatch):
+    """ensure_warp_proxy_healthy must call prepare_warp(restart=True) when port refuses."""
+    events: list[str] = []
+
+    class Warp:
+        def restart_fresh(self):
+            events.append("restart_fresh")
+
+        def connect(self):
+            events.append("connect")
+
+        def validate(self):
+            events.append("validate")
+
+    def refuse(*args, **kwargs):
+        raise OSError("refused")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    controller = ConnectivityController(
+        settings(WARP_MODE="proxy", WARP_PROXY_PORT="40000", WARP_RETRY_LIMIT="1"),
+        object(),
+        object(),
+        Warp(),
+        sleeper=lambda _: None,
+    )
+    controller.ensure_warp_proxy_healthy()
+    assert "restart_fresh" in events
+
+
+def test_ensure_warp_proxy_healthy_noop_when_port_accepts(monkeypatch):
+    """ensure_warp_proxy_healthy must not restart when port accepts connections."""
+    events: list[str] = []
+
+    class Warp:
+        def restart_fresh(self):
+            events.append("restart_fresh")
+
+    monkeypatch.setattr(socket.socket, "connect", lambda *a, **k: None)
+    controller = ConnectivityController(
+        settings(WARP_MODE="proxy", WARP_PROXY_PORT="40000", WARP_RETRY_LIMIT="1"),
+        object(),
+        object(),
+        Warp(),
+        sleeper=lambda _: None,
+    )
+    controller.ensure_warp_proxy_healthy()
+    assert events == []
+
+
+def test_prepare_reauthentication_proxy_mode_calls_ensure_healthy():
+    """prepare_reauthentication must probe proxy health in proxy mode."""
+    events: list[str] = []
+
+    class Probe:
+        def is_reachable(self):
+            events.append("probe")
+            return True
+
+    class Warp:
+        def restart_fresh(self):
+            events.append("restart_fresh")
+
+    controller = ConnectivityController(
+        settings(WARP_MODE="proxy", WARP_PROXY_PORT="40000", WARP_RETRY_LIMIT="1"),
+        Probe(),
+        object(),
+        Warp(),
+        sleeper=lambda _: None,
+    )
+    original = controller.ensure_warp_proxy_healthy
+    controller.ensure_warp_proxy_healthy = lambda: events.append("ensure_healthy")
+    controller.prepare_reauthentication()
+    assert "ensure_healthy" in events

@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 from enum import Enum, auto
-from typing import Protocol
+from typing import Callable, Protocol
 from urllib.parse import ParseResult, urlparse
 
 from cmp_auth import AuthenticationError, authenticate_cmp
@@ -26,6 +26,19 @@ from imap_client import OtpProviderProtocol
 class VpnLifecycleProtocol(Protocol):
     def prepare_reauthentication(self) -> None: ...
     def finish_authentication(self) -> None: ...
+    def ensure_warp_proxy_healthy(self, force_restart: bool = False) -> None: ...
+
+PROXY_REFUSED_MARKERS = (
+    "ns_error_proxy_connection_refused",
+    "err_proxy_connection_failed",
+    "proxy connection refused",
+)
+
+
+def _is_proxy_refused_error(exc: Exception) -> bool:
+    """True when exc text indicates a refused SOCKS5 proxy connection."""
+    text = str(exc).lower()
+    return any(marker in text for marker in PROXY_REFUSED_MARKERS)
 
 log = logging.getLogger(__name__)
 
@@ -699,6 +712,12 @@ class ContinuousMonitor:
         self._after_relogin = after_relogin
         self._consecutive_recoveries = 0
 
+    def _heal_warp_proxy(self) -> None:
+        """Restart WARP SOCKS5 proxy when vpn_manager supports proxy healing."""
+        healer = getattr(self._vpn_manager, "ensure_warp_proxy_healthy", None)
+        if callable(healer):
+            healer(force_restart=True)
+
     def _recover_to_dashboard(self) -> bool:
         """Attempt to recover to dashboard with bounded retries.
 
@@ -728,6 +747,11 @@ class ContinuousMonitor:
                         log.error("Browser target or window has been closed; aborting recovery")
                         raise RecoveryExhaustedError("Browser window or target was closed") from reload_exc
                     log.warning("Recovery page reload non-fatal error: %s", type(reload_exc).__name__)
+                    if _is_proxy_refused_error(reload_exc):
+                        log.warning(
+                            "SOCKS5 proxy connection refused during recovery reload; restarting WARP proxy"
+                        )
+                        self._heal_warp_proxy()
 
             # Try to navigate back to dashboard via the real SPA menu click.
             try:
@@ -858,6 +882,11 @@ class ContinuousMonitor:
                     )
                 except Exception as goto_exc:
                     log.warning("Direct goto products failed: %s; attempting reload", goto_exc)
+                    if _is_proxy_refused_error(goto_exc):
+                        log.warning(
+                            "SOCKS5 proxy connection refused during products navigation; restarting WARP proxy"
+                        )
+                        self._heal_warp_proxy()
                     try:
                         self._page.reload(
                             timeout=self._settings.navigation_timeout_ms,
@@ -968,7 +997,12 @@ class ContinuousMonitor:
         """Reload the dashboard and handle the post-reload route transition."""
         try:
             self._page.reload()
-        except Exception:
+        except Exception as reload_exc:
+            if _is_proxy_refused_error(reload_exc):
+                log.warning(
+                    "SOCKS5 proxy connection refused during dashboard reload; restarting WARP proxy"
+                )
+                self._heal_warp_proxy()
             log.error("Dashboard reload failed; starting bounded recovery")
             return self._recover_to_dashboard()
 

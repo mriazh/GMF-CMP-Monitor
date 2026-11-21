@@ -2698,3 +2698,46 @@ class TestDismissErrorDialog:
 
         page = _DismissErrorPage(close_visible=False, error_text_visible=True, has_keyboard=False)
         assert _dismiss_error_dialog(page) is False
+
+
+class TestProxyRefusedRecovery:
+    def test_is_proxy_refused_error_detects_all_markers(self):
+        from dashboard_monitor import _is_proxy_refused_error
+
+        assert _is_proxy_refused_error(Exception("NS_ERROR_PROXY_CONNECTION_REFUSED")) is True
+        assert _is_proxy_refused_error(Exception("ERR_PROXY_CONNECTION_FAILED")) is True
+        assert _is_proxy_refused_error(Exception("Proxy Connection Refused")) is True
+        assert _is_proxy_refused_error(Exception("ERR_NAME_NOT_RESOLVED")) is False
+
+    def test_refresh_proxy_refused_triggers_proxy_healing(self):
+        """Dashboard reload failing with proxy refused must heal the WARP proxy."""
+        settings = make_test_settings()
+        page = FakePage("https://ep.iotcc.telkomsel.com/#!dashboard")
+        page.set_menu_visible(True)
+
+        events: list[str] = []
+
+        class VpnStub:
+            def ensure_warp_proxy_healthy(self, force_restart=False):
+                events.append(f"heal:{force_restart}")
+
+            def prepare_reauthentication(self):
+                pass
+
+            def finish_authentication(self):
+                pass
+
+        def reload_fail():
+            raise RuntimeError("NS_ERROR_PROXY_CONNECTION_REFUSED")
+        page.reload = reload_fail
+
+        from dashboard_monitor import ContinuousMonitor
+        monitor = ContinuousMonitor(
+            settings=settings,
+            page=page,
+            otp_provider=FakeOtpProvider(),
+            clock=FakeClock(),
+            vpn_manager=VpnStub(),
+        )
+        assert monitor.monitor_once() is True
+        assert events == ["heal:True"]
