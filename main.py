@@ -390,6 +390,8 @@ def main(
                 or settings.warp_cli_path is not None
             ):
                 connectivity.prepare_reauthentication()
+                if getattr(settings, "warp_mode", "warp").lower() == "proxy":
+                    connectivity.ensure_warp_proxy_healthy()
             imap_client.connect()
 
         def finish_reauthentication() -> None:
@@ -466,6 +468,8 @@ def main(
                 )
                 time.sleep(30)
                 try:
+                    if getattr(settings, "warp_mode", "warp").lower() == "proxy":
+                        connectivity.ensure_warp_proxy_healthy(force_restart=True)
                     monitor._consecutive_recoveries = 0
                     monitor._relogin_and_navigate()
                 except Exception as reset_exc:

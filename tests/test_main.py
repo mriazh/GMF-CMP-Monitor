@@ -1204,3 +1204,100 @@ class TestMainVpnLifecycle:
                 assert res == 0
                 assert mock_warp.restart_fresh.call_count == 2
                 mock_imap.connect.assert_called_once()
+
+
+class TestMainProxyHealing:
+    from vpn import ConnectivityController
+
+    def _run_with_vpn(self, vpn_mock, monitor_side_effect, env_extra=None):
+        env = dict(TEST_ENV)
+        if env_extra:
+            env.update(env_extra)
+        from vpn import ConnectivityController
+
+        events: list[str] = []
+        vpn_mock.ensure_warp_proxy_healthy.side_effect = lambda force_restart=False: events.append(
+            f"heal:{force_restart}"
+        )
+
+        with patch("main.sync_playwright") as mock_sync, patch(
+            "main.authenticate_cmp"
+        ) as mock_auth, patch("main.navigate_to_dashboard"), patch(
+            "main.time.sleep"
+        ), patch("main.ContinuousMonitor") as mock_mon_class, patch(
+            "main.ImapClient"
+        ) as mock_imap_class:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+            mock_imap = MagicMock()
+            mock_imap_class.return_value = mock_imap
+            mock_mon = MagicMock()
+            mock_mon.monitor_once.side_effect = monitor_side_effect
+            mock_mon_class.return_value = mock_mon
+
+            import main
+
+            res = main.main(env=env, connectivity_factory=lambda *a: vpn_mock)
+            return res, vpn_mock, events
+
+    def test_restore_auth_connectivity_heals_proxy_in_proxy_mode(self):
+        """Startup auth-required path must call ensure_warp_proxy_healthy in proxy mode."""
+        from dashboard_monitor import AuthenticationRequiredError
+        vpn_mock = MagicMock(spec=self.ConnectivityController)
+
+        with patch("main.sync_playwright") as mock_sync, patch(
+            "main.authenticate_cmp"
+        ), patch("main.navigate_to_dashboard") as mock_nav, patch(
+            "main.time.sleep"
+        ), patch("main.ContinuousMonitor") as mock_mon_class, patch(
+            "main.ImapClient"
+        ) as mock_imap_class:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.firefox.launch.return_value = mock_browser
+            mock_browser.new_context.return_value = mock_context
+            mock_context.new_page.return_value = mock_page
+            mock_imap = MagicMock()
+            mock_imap_class.return_value = mock_imap
+            mock_nav.side_effect = [AuthenticationRequiredError("need auth"), True]
+            mock_mon = MagicMock()
+            mock_mon.monitor_once.side_effect = KeyboardInterrupt()
+            mock_mon_class.return_value = mock_mon
+
+            import main
+
+            res = main.main(
+                env={**TEST_ENV, "WARP_MODE": "proxy", "WARP_CLI_PATH": "warp-cli"},
+                connectivity_factory=lambda *a: vpn_mock,
+            )
+            assert res == 0
+            assert vpn_mock.ensure_warp_proxy_healthy.call_count >= 1
+
+    def test_recovery_exhausted_loop_heals_proxy_force_restart(self):
+        """RecoveryExhaustedError full reset must force-restart the WARP proxy."""
+        from dashboard_monitor import RecoveryExhaustedError
+        vpn_mock = MagicMock(spec=self.ConnectivityController)
+
+        def monitor_then_interrupt():
+            monitor_then_interrupt.calls += 1
+            if monitor_then_interrupt.calls == 1:
+                raise RecoveryExhaustedError("Max retries")
+            raise KeyboardInterrupt()
+        monitor_then_interrupt.calls = 0
+
+        res, vpn_mock, events = self._run_with_vpn(
+            vpn_mock,
+            monitor_then_interrupt,
+            env_extra={"WARP_MODE": "proxy", "WARP_CLI_PATH": "warp-cli"},
+        )
+        assert res == 0
+        assert any(e == "heal:True" for e in events)

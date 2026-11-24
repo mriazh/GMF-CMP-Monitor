@@ -536,7 +536,6 @@ class WarpClient:
             self.disconnect()
         except Exception:
             pass
-        self.owned = True
         try:
             _run_command(
                 self.executable,
@@ -739,6 +738,28 @@ class ConnectivityController:
                 self._sleep(self.settings.checkpoint_status_poll_interval_seconds)
         raise last_error or CheckPointError("Check Point connection failed")
 
+    def ensure_warp_proxy_healthy(self, force_restart: bool = False) -> None:
+        """Restart WARP when SOCKS5 proxy mode port is down or force_restart is set."""
+        mode = getattr(self.settings, "warp_mode", "warp").lower()
+        if mode != "proxy":
+            return
+        if not force_restart:
+            port = self.settings.warp_proxy_port
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                sock.settimeout(2.0)
+                sock.connect(("127.0.0.1", port))
+            except OSError:
+                pass
+            else:
+                return
+            finally:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        self.prepare_warp(restart=True)
+
     def prepare_warp(self, restart: bool = False) -> None:
         last_error: WarpError | None = None
         for attempt in range(1, self.settings.warp_retry_limit + 1):
@@ -754,8 +775,9 @@ class ConnectivityController:
                 if getattr(self.warp, "owned", False):
                     try:
                         self.warp.disconnect()
-                    except WarpError as cleanup_error:
-                        last_error = cleanup_error
+                    except WarpError:
+                        # Preserve primary cause; never shadow connect/validate error
+                        pass
                 if attempt < self.settings.warp_retry_limit:
                     self._sleep(self.settings.warp_status_poll_interval_seconds)
         raise last_error or WarpError("WARP preparation failed")
@@ -764,6 +786,8 @@ class ConnectivityController:
         self.checkpoint.disconnect()
 
     def prepare_reauthentication(self) -> None:
+        if getattr(self.settings, "warp_mode", "warp").lower() == "proxy":
+            self.ensure_warp_proxy_healthy()
         if (
             getattr(self.warp, "owned", False)
             and getattr(self.settings, "warp_mode", "warp").lower() != "proxy"
